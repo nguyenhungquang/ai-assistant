@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# Local editor / agent state
+.obsidian/
+.codex
+
+# Internal development docs (not for release)
+docs-internal/
+
+# Local runtime state
+system/state.db
+system/cache/*
+!system/cache/.gitkeep
+system/logs/*
+!system/logs/.gitkeep
+index.md
+log.md
+
+# Local source artifacts
+raw/papers/*
+!raw/papers/.gitkeep
+raw/posts/*
+!raw/posts/.gitkeep
+raw/extracted/*
+!raw/extracted/.gitkeep
+raw/html/*
+!raw/html/.gitkeep
+
+# Local wiki/runtime artifacts
+wiki/papers/*
+!wiki/papers/.gitkeep
+wiki/posts/*
+!wiki/posts/.gitkeep
+wiki/topics/*
+!wiki/topics/.gitkeep
+wiki/entities/*
+!wiki/entities/.gitkeep
+wiki/syntheses/*
+!wiki/syntheses/.gitkeep
+wiki/inbox/*
+!wiki/inbox/.gitkeep
