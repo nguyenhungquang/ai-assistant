@@ -59,6 +59,7 @@ Return JSON only, with this shape:
 
 - `big_picture` must be non-empty.
 - Include at least 1 `main_contributions` item and at least 1 `main_results` item when the packet supports them.
+- `method_overview` must be non-empty and must explain how the paper works.
 - Use only `chunk_ids` present in the packet.
 - Every substantive statement must have supporting `chunk_ids`.
 - Keep wording conservative.
@@ -68,6 +69,7 @@ Return JSON only, with this shape:
 - Do not output explanations.
 - Do not use outside knowledge.
 - Do not invent evidence.
+- If the source contains equations or formal expressions, rewrite them using Obsidian-compatible math syntax with `$...$` or `$$...$$`.
 
 ## Style
 
@@ -88,3 +90,5 @@ Return JSON only, with this shape:
 - Do not repeat the same sentence across multiple sections.
 - Do not reuse the same `chunk_ids` for nearly every section if other evidence exists in the packet.
 - Do not leave substantive sections empty when the packet contains clear candidate evidence.
+- Do not leave `method_overview` empty or fill it with headline results.
+- Do not restate the same evidence block in multiple sections.

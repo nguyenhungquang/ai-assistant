@@ -346,6 +346,8 @@ def build_draft_packet(
             "Do not invent facts or use evidence outside this packet.",
             "Use only packet chunk IDs for evidence linkage.",
             "Prefer plain-English synthesis over copied source text when possible.",
+            "Method Overview must explain how the paper works using method evidence, not result evidence.",
+            "If the source contains equations or formal expressions, render them using Obsidian-compatible math syntax with $...$ or $$...$$.",
         ],
         "draft_template": (
             "Write a top-down research note with: big_picture, main_contributions, "
@@ -984,7 +986,7 @@ def validate_draft_output(
             draft_output.get("main_results", []), limit=5
         ),
         "method_overview": normalize_section(
-            draft_output.get("method_overview", {}), allow_empty=True
+            draft_output.get("method_overview", {}), allow_empty=False
         ),
         "detailed_findings": normalize_section_list(
             draft_output.get("detailed_findings", []), limit=6
@@ -1030,6 +1032,10 @@ def validate_draft_output(
         raise ValueError("external draft output must include at least one main_contribution")
     if strict and not normalized["main_results"]:
         raise ValueError("external draft output must include at least one main_result")
+    if strict and not normalized["method_overview"]["text"]:
+        raise ValueError("external draft output must include a non-empty method_overview")
+    if strict and not normalized["method_overview"]["chunk_ids"]:
+        raise ValueError("external draft output must link method_overview to at least one supporting chunk_id")
 
     for name, section in nonempty_sections:
         text = section["text"]

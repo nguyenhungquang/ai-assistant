@@ -908,24 +908,6 @@ def build_page_markdown(
         if open_questions
         else "- No explicit open questions extracted yet."
     )
-    evidence_map_lines = []
-    for label, items in [
-        ("Big Picture", [big_picture]),
-        ("Main Contributions", contributions),
-        ("Main Results", main_results),
-    ]:
-        for item in items:
-            text = clean_text(item.get("text"))
-            if not text:
-                continue
-            evidence_map_lines.append(
-                f"### {label}\n{text}\n\nSupport\n{evidence_lines(item.get('chunk_ids', []), fallback='- Supporting evidence is not linked yet.')}"
-            )
-    evidence_map_block = (
-        "\n\n".join(evidence_map_lines)
-        if evidence_map_lines
-        else "No evidence map extracted yet."
-    )
     provenance_lines = [
         f"- Status: `needs-review`",
         f"- Canonical locator: {locator_line}",
@@ -966,17 +948,13 @@ verifier_status: pending
 
 {contributions_block}
 
-## Main Results
-
-{results_block}
-
 ## Method Overview
 
 {format_section(method_overview)}
 
-## Evidence Map
+## Main Results
 
-{evidence_map_block}
+{results_block}
 
 ## Experiments And Detailed Findings
 
