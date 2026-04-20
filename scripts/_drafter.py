@@ -27,6 +27,7 @@ class DraftPacket(TypedDict):
     drafting_rules: list[str]
     draft_template: str
     candidate_groups: dict
+    section_blocks: dict
     chunks: list[DraftChunk]
 
 
@@ -59,9 +60,6 @@ class DraftOutput(TypedDict):
 SECTION_PRIORITY_KEYWORDS = [
     (("abstract", "summary"), 0),
     (("introduction", "overview"), 1),
-    (("results", "findings", "evaluation", "experiment"), 2),
-    (("conclusion", "conclusions"), 3),
-    (("discussion",), 4),
     (
         (
             "method",
@@ -75,8 +73,11 @@ SECTION_PRIORITY_KEYWORDS = [
             "training",
             "proof",
         ),
-        5,
+        2,
     ),
+    (("results", "findings", "evaluation", "experiment"), 3),
+    (("conclusion", "conclusions"), 4),
+    (("discussion",), 5),
 ]
 
 CONTRIBUTION_CUES = [
@@ -168,6 +169,15 @@ METHOD_DETAIL_CUES = [
     "baseline",
     "implementation",
 ]
+METHOD_OVERVIEW_EXCLUSION_CUES = [
+    "table ",
+    "development set",
+    "beam search",
+    "checkpoint averaging",
+    "newstest",
+    "bleu",
+    "state-of-the-art",
+]
 LIMITATION_CUES = [
     "limitation",
     "future work",
@@ -240,6 +250,7 @@ def build_draft_packet(
     quality_label: str,
     quality_notes: list[str],
     chunks: list[DraftChunk],
+    section_blocks: dict | None = None,
 ) -> DraftPacket:
     ranked_chunks = [
         chunk
@@ -248,7 +259,34 @@ def build_draft_packet(
         and not is_noise_chunk(chunk)
         and not is_reference_like(chunk)
     ]
-    selected = ranked_chunks[:12]
+
+    def extend_unique(target: list[DraftChunk], candidates: list[DraftChunk], limit: int) -> None:
+        seen_ids = {item["chunk_id"] for item in target}
+        for candidate in candidates:
+            if candidate["chunk_id"] in seen_ids:
+                continue
+            target.append(candidate)
+            seen_ids.add(candidate["chunk_id"])
+            if len(target) >= limit:
+                break
+
+    selected: list[DraftChunk] = []
+    extend_unique(
+        selected,
+        [chunk for chunk in ranked_chunks if has_section_ancestry(chunk, {"abstract", "introduction"})],
+        3,
+    )
+    extend_unique(
+        selected,
+        [chunk for chunk in ranked_chunks if has_section_ancestry(chunk, {"method"})],
+        7,
+    )
+    extend_unique(
+        selected,
+        [chunk for chunk in ranked_chunks if has_section_ancestry(chunk, {"results", "discussion", "conclusion"})],
+        11,
+    )
+    extend_unique(selected, ranked_chunks, 12)
     packet_chunks = [
         {
             **chunk,
@@ -258,28 +296,34 @@ def build_draft_packet(
     ]
     big_picture_chunks = pick_chunks(
         packet_chunks,
-        predicate=lambda chunk: "abstract" in (chunk.get("section_path") or "").lower()
-        or "introduction" in (chunk.get("section_path") or "").lower()
-        or "conclusion" in (chunk.get("section_path") or "").lower(),
+        predicate=lambda chunk: has_section_ancestry(
+            chunk, {"abstract", "introduction", "conclusion"}
+        ),
         limit=4,
         role="big_picture",
     )
     contribution_chunks = pick_chunks(
         packet_chunks,
-        predicate=lambda chunk: text_matches(chunk, CONTRIBUTION_CUES)
-        or "abstract" in (chunk.get("section_path") or "").lower(),
+        predicate=lambda chunk: has_section_ancestry(
+            chunk, {"abstract", "introduction", "conclusion"}
+        )
+        or text_matches(chunk, CONTRIBUTION_CUES),
         limit=5,
         role="contribution",
     )
     result_chunks = pick_chunks(
         packet_chunks,
-        predicate=lambda chunk: is_result_like(chunk) and supports_result_role(chunk),
+        predicate=lambda chunk: (
+            has_section_ancestry(chunk, {"results", "discussion", "conclusion"})
+            and supports_result_role(chunk)
+        ),
         limit=5,
         role="result",
     )
     method_chunks = pick_chunks(
         packet_chunks,
-        predicate=lambda chunk: text_matches(chunk, METHOD_CUES),
+        predicate=lambda chunk: has_section_ancestry(chunk, {"method"})
+        and text_matches(chunk, METHOD_CUES),
         limit=4,
         role="method",
     )
@@ -291,29 +335,38 @@ def build_draft_packet(
     )
     method_equation_chunks = pick_chunks(
         packet_chunks,
-        predicate=lambda chunk: text_matches(chunk, METHOD_CUES)
+        predicate=lambda chunk: has_section_ancestry(chunk, {"method"})
+        and text_matches(chunk, METHOD_CUES)
         and is_equation_heavy(chunk),
         limit=4,
         role="method_equation",
     )
     technical_method_chunks = pick_chunks(
         packet_chunks,
-        predicate=lambda chunk: text_matches(chunk, METHOD_CUES),
+        predicate=lambda chunk: has_section_ancestry(chunk, {"method"})
+        and text_matches(chunk, METHOD_CUES),
         limit=6,
         role="method",
     )
     detail_chunks = pick_chunks(
         packet_chunks,
         predicate=lambda chunk: (
-            (is_result_like(chunk) and supports_result_role(chunk))
-            or text_matches(chunk, DETAIL_CUES)
+            (
+                has_section_ancestry(chunk, {"results", "discussion"})
+                and is_result_like(chunk)
+                and supports_result_role(chunk)
+            )
+            or (has_section_ancestry(chunk, {"method"}) and text_matches(chunk, DETAIL_CUES))
         ),
         limit=6,
         role="detail",
     )
     limitation_chunks = pick_chunks(
         packet_chunks,
-        predicate=lambda chunk: text_matches(chunk, LIMITATION_CUES),
+        predicate=lambda chunk: has_section_ancestry(
+            chunk, {"limitations", "discussion", "conclusion"}
+        )
+        or text_matches(chunk, LIMITATION_CUES),
         limit=4,
         role="limitation",
     )
@@ -398,6 +451,26 @@ def build_draft_packet(
             )
         return bundled
 
+    def compact_section_blocks() -> dict:
+        if not section_blocks:
+            return {}
+        compact: dict[str, list[dict[str, str]]] = {}
+        for role, blocks in section_blocks.items():
+            trimmed: list[dict[str, str]] = []
+            for block in blocks[:3]:
+                text = re.sub(r"\s+", " ", (block.get("text") or "").strip())
+                if not text:
+                    continue
+                trimmed.append(
+                    {
+                        "section_path": block.get("section_path") or role,
+                        "text": text[:4000],
+                    }
+                )
+            if trimmed:
+                compact[role] = trimmed
+        return compact
+
     return {
         "source_id": source_id,
         "title": title,
@@ -441,6 +514,7 @@ def build_draft_packet(
             "detailed_finding_candidates": bundle_candidates(detail_candidates),
             "limitation_candidates": bundle_candidates(limitation_candidates),
         },
+        "section_blocks": compact_section_blocks(),
         "chunks": packet_chunks,
     }
 
@@ -458,6 +532,35 @@ def chunk_rank(chunk: DraftChunk) -> tuple[int, int]:
     return priority, chunk["char_start"]
 
 
+def section_parts(chunk: DraftChunk) -> list[str]:
+    section_path = (chunk.get("section_path") or "").lower()
+    return [part.strip() for part in section_path.split(" > ") if part.strip()]
+
+
+def primary_section_role(chunk: DraftChunk) -> str | None:
+    parts = section_parts(chunk)
+    return parts[0] if parts else None
+
+
+def has_section_ancestry(chunk: DraftChunk, roles: set[str]) -> bool:
+    return primary_section_role(chunk) in roles
+
+
+def rhetorical_function(chunk: DraftChunk) -> str:
+    primary = primary_section_role(chunk)
+    if primary in {"method", "results", "limitations", "discussion", "conclusion", "background", "introduction", "abstract"}:
+        return primary
+    if text_matches(chunk, LIMITATION_CUES):
+        return "limitations"
+    if is_result_like(chunk):
+        return "results"
+    if text_matches(chunk, METHOD_CUES):
+        return "method"
+    if text_matches(chunk, CONTRIBUTION_CUES):
+        return "introduction"
+    return "body"
+
+
 def text_matches(chunk: DraftChunk, cues: list[str]) -> bool:
     text = chunk["chunk_text"].lower()
     return any(cue in text for cue in cues)
@@ -468,6 +571,7 @@ def candidate_signals(chunk: DraftChunk) -> list[str]:
     section_path = (chunk.get("section_path") or "").lower()
     if section_path:
         signals.append(f"section:{section_path}")
+    signals.append(f"rhetoric:{rhetorical_function(chunk)}")
     if text_matches(chunk, CONTRIBUTION_CUES):
         signals.append("cue:contribution")
     if text_matches(chunk, METHOD_CUES):
@@ -507,13 +611,29 @@ def is_equation_heavy(chunk: DraftChunk) -> bool:
 
 
 def is_method_overview_like(chunk: DraftChunk) -> bool:
+    if has_section_ancestry(chunk, {"results", "discussion", "limitations", "conclusion"}):
+        return False
     section = (chunk.get("section_path") or "").lower()
-    if any(label in section for label in {"method", "approach", "framework", "architecture"}):
+    if has_section_ancestry(chunk, {"method"}) or any(
+        label in section for label in {"method", "approach", "framework", "architecture"}
+    ):
         if text_matches(chunk, METHOD_OVERVIEW_CUES):
             return True
-        if not text_matches(chunk, METHOD_DETAIL_CUES) and not is_equation_heavy(chunk):
+        if (
+            not text_matches(chunk, METHOD_DETAIL_CUES)
+            and not is_equation_heavy(chunk)
+            and not is_result_like(chunk)
+        ):
             return True
-    return text_matches(chunk, METHOD_OVERVIEW_CUES) and not is_equation_heavy(chunk)
+    return (
+        has_section_ancestry(chunk, {"abstract", "introduction"})
+        and text_matches(
+            chunk,
+            ["we propose", "we present", "in this work", "our approach", "our method"],
+        )
+        and not is_equation_heavy(chunk)
+        and not is_result_like(chunk)
+    )
 
 
 def is_reference_like(chunk: DraftChunk) -> bool:
@@ -569,7 +689,8 @@ def supports_result_role(chunk: DraftChunk) -> bool:
     section = (chunk.get("section_path") or "").lower()
     text = chunk["chunk_text"].lower()
     return (
-        any(label in section for label in RESULT_SECTION_CUES)
+        has_section_ancestry(chunk, {"results", "discussion", "conclusion"})
+        or any(label in section for label in RESULT_SECTION_CUES)
         or bool(
             re.search(
                 r"\b\d+(?:\.\d+)?\s*(?:%|percent|accuracy|f1|auc|r2|rmse|mae|hours?|days?|seconds?|ms|x)\b",
@@ -703,6 +824,8 @@ def role_sentence_score(sentence: str, role: str) -> int:
             score -= 2
         if any(cue in lowered for cue in RESULT_CUES):
             score -= 2
+        if any(cue in lowered for cue in METHOD_OVERVIEW_EXCLUSION_CUES):
+            score -= 6
     elif role == "method_equation":
         if any(cue in lowered for cue in EQUATION_CUES):
             score += 4
@@ -852,6 +975,8 @@ def candidate_score(chunk: DraftChunk, role: str) -> int:
             score -= 3
         if is_equation_heavy(chunk):
             score -= 4
+        if text_matches(chunk, METHOD_OVERVIEW_EXCLUSION_CUES):
+            score -= 8
     elif role == "method_equation":
         score += section_score(chunk, {"method", "approach", "architecture", "framework"})
         if is_equation_heavy(chunk):
@@ -970,8 +1095,7 @@ def draft_from_packet(packet: DraftPacket) -> DraftOutput:
             pick_chunks(
                 chunks,
                 predicate=lambda chunk: (
-                    "abstract" in (chunk.get("section_path") or "").lower()
-                    or "introduction" in (chunk.get("section_path") or "").lower()
+                    has_section_ancestry(chunk, {"abstract", "introduction"})
                     or text_matches(chunk, CONTRIBUTION_CUES)
                 ),
                 limit=1,
@@ -988,7 +1112,8 @@ def draft_from_packet(packet: DraftPacket) -> DraftOutput:
     )
     method_candidates = pick_chunks(
         chunks,
-        predicate=lambda chunk: text_matches(chunk, METHOD_CUES),
+        predicate=lambda chunk: has_section_ancestry(chunk, {"method"})
+        and text_matches(chunk, METHOD_CUES),
         limit=2,
         role="method",
     )
@@ -998,28 +1123,41 @@ def draft_from_packet(packet: DraftPacket) -> DraftOutput:
     )
     contribution_chunks = pick_chunks(
         chunks,
-        predicate=lambda chunk: text_matches(chunk, CONTRIBUTION_CUES)
-        or "abstract" in (chunk.get("section_path") or "").lower(),
+        predicate=lambda chunk: has_section_ancestry(
+            chunk, {"abstract", "introduction", "conclusion"}
+        )
+        or text_matches(chunk, CONTRIBUTION_CUES),
         limit=4,
         role="contribution",
     )
     result_chunks = pick_chunks(
         chunks,
-        predicate=lambda chunk: is_result_like(chunk) and supports_result_role(chunk),
+        predicate=lambda chunk: has_section_ancestry(
+            chunk, {"results", "discussion", "conclusion"}
+        )
+        and is_result_like(chunk)
+        and supports_result_role(chunk),
         limit=4,
         role="result",
     )
     limitation_chunks = pick_chunks(
         chunks,
-        predicate=lambda chunk: text_matches(chunk, LIMITATION_CUES),
+        predicate=lambda chunk: has_section_ancestry(
+            chunk, {"limitations", "discussion", "conclusion"}
+        )
+        or text_matches(chunk, LIMITATION_CUES),
         limit=3,
         role="limitation",
     )
     detail_chunks = pick_chunks(
         chunks,
         predicate=lambda chunk: (
-            (is_result_like(chunk) and supports_result_role(chunk))
-            or text_matches(chunk, DETAIL_CUES)
+            (
+                has_section_ancestry(chunk, {"results", "discussion"})
+                and is_result_like(chunk)
+                and supports_result_role(chunk)
+            )
+            or (has_section_ancestry(chunk, {"method"}) and text_matches(chunk, DETAIL_CUES))
         ),
         limit=4,
         role="detail",

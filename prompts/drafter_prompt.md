@@ -8,6 +8,8 @@ You will receive exactly one JSON object called `draft_packet`.
 
 Use only the information in that packet.
 
+The packet may also include `section_blocks` with bounded full text for important roles such as `method`, `results`, and `conclusion`. Use those blocks to understand the local section context when candidate spans are ambiguous.
+
 ## Output
 
 Return JSON only, with this shape:
@@ -64,6 +66,8 @@ Return JSON only, with this shape:
 - Every substantive statement must have supporting `chunk_ids`.
 - Keep wording conservative.
 - Follow the packet `drafting_rules` and prefer the packet `candidate_groups`.
+- Use `section_blocks.method` to understand the overall approach before drafting `method_overview` when that block is present.
+- Use `section_blocks.results` and `section_blocks.conclusion` as local context for `main_results` and `limitations` when those blocks are present.
 - Prefer `candidate_groups.method_overview_candidates` for `method_overview`.
 - Use `candidate_groups.method_equation_candidates` only when a key equation is central to explaining the method.
 - Use `candidate_groups.technical_method_candidates` in `detailed_findings`, not as the main `method_overview`, unless the packet lacks broader method evidence.

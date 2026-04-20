@@ -173,20 +173,118 @@ def extract_arxiv_html(html_text: str) -> dict:
         abstract = clean_html_text(abstract_node.get_text(" ", strip=True))
 
     body_parts: list[str] = []
-    if abstract:
-        body_parts.append("Abstract")
-        body_parts.append(abstract)
+    section_markers: list[dict[str, Any]] = []
+    section_blocks: dict[str, list[dict[str, str]]] = {}
+    current_offset = 0
 
-    for section in soup.select("article > section"):
-        for node in section.find_all(["h2", "h3", "h4", "h5", "h6", "p"]):
-            if node.name.startswith("h"):
-                heading_text = clean_html_text(node.get_text(" ", strip=True))
-                if heading_text:
-                    body_parts.append(heading_text)
-            elif "ltx_p" in (node.get("class") or []):
-                para_text = clean_html_text(node.get_text(" ", strip=True))
+    def append_block(text: str) -> int | None:
+        nonlocal current_offset
+        cleaned = clean_html_text(text)
+        if not cleaned:
+            return None
+        if body_parts:
+            current_offset += 2
+        offset = current_offset
+        body_parts.append(cleaned)
+        current_offset += len(cleaned)
+        return offset
+
+    def append_section_block(role: str, section_path: str, texts: list[str]) -> None:
+        block_text = "\n\n".join(text for text in texts if text).strip()
+        if not block_text:
+            return
+        section_blocks.setdefault(role, []).append(
+            {"section_path": section_path, "text": block_text}
+        )
+
+    if abstract:
+        offset = append_block("Abstract")
+        if offset is not None:
+            section_markers.append(
+                {
+                    "offset": offset,
+                    "raw_heading": "Abstract",
+                    "level": 1,
+                    "canonical_role": "abstract",
+                    "section_path": "abstract",
+                }
+            )
+        append_block(abstract)
+
+    def visit_section(
+        section: Any,
+        *,
+        root_role: str | None,
+        path_parts: list[str],
+        level: int,
+    ) -> list[str]:
+        heading_text = None
+        for child in section.children:
+            if getattr(child, "name", None) in {"h2", "h3", "h4", "h5", "h6"}:
+                heading_text = clean_html_text(child.get_text(" ", strip=True))
+                break
+
+        role = canonical_section_role(heading_text or "") or root_role or "body"
+        if root_role is None or role != root_role:
+            current_root_role = role
+            current_parts: list[str] = []
+        else:
+            current_root_role = root_role
+            current_parts = list(path_parts)
+
+        normalized_heading = normalize_heading_text(heading_text or "").lower()
+        if normalized_heading and normalized_heading not in {
+            current_root_role,
+            *current_parts,
+        }:
+            current_parts.append(normalized_heading)
+        section_path = (
+            " > ".join([current_root_role, *current_parts])
+            if current_parts
+            else current_root_role
+        )
+
+        section_texts: list[str] = []
+        for child in section.children:
+            child_name = getattr(child, "name", None)
+            if child_name in {"h2", "h3", "h4", "h5", "h6"}:
+                child_heading = clean_html_text(child.get_text(" ", strip=True))
+                offset = append_block(child_heading)
+                if offset is not None:
+                    section_markers.append(
+                        {
+                            "offset": offset,
+                            "raw_heading": child_heading,
+                            "level": level,
+                            "canonical_role": current_root_role,
+                            "section_path": section_path,
+                        }
+                    )
+            elif child_name == "section":
+                section_texts.extend(
+                    visit_section(
+                        child,
+                        root_role=current_root_role,
+                        path_parts=current_parts,
+                        level=level + 1,
+                    )
+                )
+            elif child_name in {"p", "div"} and any(
+                cls.startswith("ltx_p") or cls == "ltx_para"
+                for cls in (child.get("class") or [])
+            ):
+                para_text = clean_html_text(child.get_text(" ", strip=True))
                 if para_text:
-                    body_parts.append(para_text)
+                    append_block(para_text)
+                    section_texts.append(para_text)
+
+        append_section_block(current_root_role, section_path, section_texts)
+        return section_texts
+
+    article = soup.select_one("article")
+    if article is not None:
+        for section in article.find_all("section", recursive=False):
+            visit_section(section, root_role=None, path_parts=[], level=1)
 
     extracted_text = "\n\n".join(body_parts).strip()
     year = None
@@ -204,6 +302,8 @@ def extract_arxiv_html(html_text: str) -> dict:
         "extracted_text": extracted_text,
         "page_count": None,
         "page_breaks": page_breaks,
+        "section_markers": section_markers,
+        "section_blocks": section_blocks,
     }
 
 
@@ -544,7 +644,6 @@ SECTION_ROLE_KEYWORDS: dict[str, tuple[str, ...]] = {
         "algorithm",
         "implementation",
         "architecture",
-        "model",
         "training",
         "optimizer",
         "regularization",
@@ -1009,6 +1108,8 @@ def prepare_ingest(
     parsed_snapshot_rel: str | None = None
     html_snapshot_text: str | None = None
     pdf_bytes: bytes | None = None
+    html_section_markers: list[dict[str, Any]] | None = None
+    section_blocks: dict[str, list[dict[str, str]]] = {}
 
     if arxiv_ref is not None:
         canonical_locator = arxiv_ref["canonical_locator"]
@@ -1077,6 +1178,8 @@ def prepare_ingest(
             title = title_override.strip() if title_override else html_data["title"]
             authors_or_creator = html_data["authors_or_creator"]
             published_at = html_data["published_at"]
+            html_section_markers = html_data.get("section_markers")
+            section_blocks = html_data.get("section_blocks") or {}
         conn.close()
     else:
         if not source_path.exists():
@@ -1138,7 +1241,7 @@ def prepare_ingest(
         parsed_snapshot_rel = str(raw_target.relative_to(ROOT))
     extracted_target.write_text(extracted_text + ("\n" if extracted_text else ""))
 
-    section_markers = detect_section_markers(extracted_text)
+    section_markers = html_section_markers or detect_section_markers(extracted_text)
     chunks = split_text_into_chunks(
         extracted_text, page_breaks, section_markers=section_markers
     )
@@ -1157,6 +1260,7 @@ def prepare_ingest(
         quality_label=quality_label,
         quality_notes=quality_notes,
         chunks=chunks,
+        section_blocks=section_blocks,
     )
 
     now = utc_now()
