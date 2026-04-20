@@ -45,6 +45,13 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_prepare.add_argument("--canonical-locator")
     ingest_prepare.add_argument("--json", action="store_true")
 
+    draft_handoff = subparsers.add_parser(
+        "draft-handoff",
+        help="Emit the canonical external-drafter handoff payload for a prepared ingest",
+    )
+    draft_handoff.add_argument("prepared_json")
+    draft_handoff.add_argument("--json", action="store_true")
+
     ingest_finalize = subparsers.add_parser(
         "ingest-finalize",
         help="Finalize ingest from prepared packet and optional draft output",
@@ -66,11 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--top-k", type=int, default=5)
     ask.add_argument("--json", action="store_true")
 
-    verify = subparsers.add_parser("verify", help="Verify a draft page")
+    verify = subparsers.add_parser("verify", help="Verify a wiki page")
     verify.add_argument("page_path")
     verify.add_argument("--json", action="store_true")
 
-    publish = subparsers.add_parser("publish", help="Publish a verified inbox page")
+    publish = subparsers.add_parser("publish", help="Mark a verified wiki page as published")
     publish.add_argument("page_path")
     publish.add_argument("--json", action="store_true")
 
@@ -229,8 +236,6 @@ def load_draft_input(
     elif getattr(args, "draft_output_stdin", False):
         draft_input_text = sys.stdin.read()
         script_args.append("--draft-output-stdin")
-    else:
-        warnings.append("No external draft provided; using heuristic drafter fallback.")
     return draft_input_text, script_args, warnings
 
 
@@ -288,6 +293,79 @@ def handle_ingest_finalize(args: argparse.Namespace) -> tuple[int, dict]:
     return 2, response
 
 
+def expected_draft_output_schema() -> dict[str, Any]:
+    section = {"text": "string", "chunk_ids": ["src_..._chunk_00001"]}
+    return {
+        "big_picture": section,
+        "main_contributions": [section],
+        "main_results": [section],
+        "method_overview": section,
+        "detailed_findings": [section],
+        "limitations": [section],
+        "open_questions": [section],
+    }
+
+
+def load_prepared_json(prepared_json: str) -> dict[str, Any]:
+    prepared_path = Path(prepared_json).expanduser()
+    if not prepared_path.is_absolute():
+        prepared_path = (ROOT / prepared_path).resolve(strict=False)
+    return normalize_paths(json.loads(prepared_path.read_text()))
+
+
+def handle_draft_handoff(args: argparse.Namespace) -> tuple[int, dict]:
+    prepared = load_prepared_json(args.prepared_json)
+    prompt_path = ROOT / "prompts" / "drafter_prompt.md"
+    prompt_text = prompt_path.read_text()
+    prepared_rel = normalize_path(str(args.prepared_json))
+    finalize_command = (
+        prepared.get("coordination", {}) or {}
+    ).get(
+        "finalize_command",
+        f"uv run scripts/hub.py ingest-finalize {prepared_rel} --draft-output-file <draft.json> --json",
+    )
+    verify_command = (
+        prepared.get("coordination", {}) or {}
+    ).get(
+        "verify_command",
+        f"uv run scripts/hub.py verify {prepared.get('page_path')} --json",
+    )
+    handoff = {
+        "handoff_version": "v1",
+        "description": (
+            "Canonical external-drafter handoff. Give payload.draft_packet to one bounded drafting subagent, require JSON-only output matching expected_output_schema, then pass the returned file into finalize_command."
+        ),
+        "prompt_path": normalize_path(str(prompt_path)),
+        "prompt_text": prompt_text,
+        "payload": {
+            "draft_packet": prepared.get("draft_packet"),
+        },
+        "expected_output_schema": expected_draft_output_schema(),
+        "constraints": {
+            "json_only": True,
+            "use_only_packet_evidence": True,
+            "allowed_chunk_ids": [
+                chunk["chunk_id"] for chunk in prepared.get("draft_packet", {}).get("chunks", [])
+            ],
+        },
+        "next_steps": {
+            "finalize_command": finalize_command,
+            "verify_command": verify_command,
+            "target_page_path": prepared.get("page_path"),
+        },
+    }
+    response = envelope(
+        command="draft-handoff",
+        ok=True,
+        status="ready",
+        issues=[],
+        warnings=[],
+        result=handoff,
+        writes={},
+    )
+    return 0, response
+
+
 def handle_add_source(args: argparse.Namespace) -> tuple[int, dict]:
     prepare_args = argparse.Namespace(
         source=args.source,
@@ -306,6 +384,31 @@ def handle_add_source(args: argparse.Namespace) -> tuple[int, dict]:
     prepared_path.write_text(json.dumps(prepared_payload, indent=2))
 
     draft_input_text, finalize_extra_args, warnings = load_draft_input(args)
+    if not finalize_extra_args:
+        response = envelope(
+            command="add-source",
+            ok=True,
+            status="needs-draft",
+            issues=[],
+            warnings=[
+                "Prepared ingest is staged. Top-level coordinator should hand result.draft_packet to one bounded drafting subagent, then call ingest-finalize with the structured draft output."
+            ],
+            result={
+                "source_id": prepared_payload.get("source_id"),
+                "version_id": prepared_payload.get("version_id"),
+                "page_id": prepared_payload.get("page_id"),
+                "page_path": prepared_payload.get("page_path"),
+                "source_kind": prepared_payload.get("source_kind"),
+                "chunk_count": prepared_payload.get("chunk_count"),
+                "prepared_json": normalize_path(str(prepared_path)),
+                "coordination": prepared_payload.get("coordination"),
+                "draft_packet": prepared_payload.get("draft_packet"),
+            },
+            writes={
+                "prepared_json": normalize_path(str(prepared_path)),
+            },
+        )
+        return 2, response
     finalize_args = [str(prepared_path)] + finalize_extra_args
     finalize_proc = run_script(
         "ingest_finalize.py", finalize_args, input_text=draft_input_text
@@ -514,8 +617,8 @@ def handle_verify(args: argparse.Namespace) -> tuple[int, dict]:
     code = 0 if verdict == "pass" else 2
     supporting_spans = []
     persisted = parsed.get("persisted")
-    if persisted and persisted.get("evidence"):
-        supporting_spans.append(persisted["evidence"])
+    if persisted:
+        supporting_spans.extend(persisted.get("supporting_spans", []))
     response = envelope(
         command="verify",
         ok=True,
@@ -527,6 +630,7 @@ def handle_verify(args: argparse.Namespace) -> tuple[int, dict]:
             "verdict": verdict,
             "summary_claim": parsed.get("summary_claim"),
             "supporting_spans": supporting_spans,
+            "claim_results": parsed.get("claim_results", []),
         },
         writes={"verification_state": "sqlite"} if parsed.get("persisted") else {},
     )
@@ -567,6 +671,7 @@ def main() -> None:
         "add-source": handle_add_source,
         "ask": handle_ask,
         "ingest-prepare": handle_ingest_prepare,
+        "draft-handoff": handle_draft_handoff,
         "ingest-finalize": handle_ingest_finalize,
         "retrieve": handle_retrieve,
         "verify": handle_verify,

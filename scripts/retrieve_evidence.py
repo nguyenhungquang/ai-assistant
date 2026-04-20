@@ -3,18 +3,14 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 
-from _common import connect_db, db_has_retrieval_schema
-
-
-SECTION_WEIGHTS = {
-    "abstract": -2.5,
-    "introduction": -1.5,
-    "results": -1.0,
-    "conclusion": -0.75,
-}
+from _common import (
+    connect_db,
+    db_has_retrieval_schema,
+    retrieve_supporting_chunks,
+    safe_match_query,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,15 +20,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("query", help="Search query")
     parser.add_argument("--top-k", type=int, default=5)
     return parser.parse_args()
-
-
-def safe_match_query(query: str) -> str:
-    tokens = [token for token in re.split(r"\s+", query.strip()) if token]
-    if not tokens:
-        return '""'
-    escaped = [f'"{token.replace('"', '""')}"' for token in tokens]
-    return " ".join(escaped)
-
 
 def main() -> None:
     args = parse_args()
@@ -99,46 +86,33 @@ def main() -> None:
         """,
         (match_query, args.top_k),
     ).fetchall()
-    chunk_rows = conn.execute(
-        """
-        SELECT f.chunk_id, c.source_id, c.section_path, c.page_num, substr(c.chunk_text, 1, 300) AS excerpt, f.rank,
-               p.title AS page_title, p.path AS page_path
-        FROM (
-            SELECT chunk_id, bm25(chunks_fts) AS rank
-            FROM chunks_fts
-            WHERE chunks_fts MATCH ?
-        ) AS f
-        JOIN chunks c ON c.chunk_id = f.chunk_id
-        LEFT JOIN pages p ON p.primary_source_id = c.source_id
-        ORDER BY f.rank
-        LIMIT ?
-        """,
-        (match_query, args.top_k),
-    ).fetchall()
-    conn.close()
-
-    reranked_chunks = []
-    for row in chunk_rows:
-        item = dict(row)
-        section_path = (item.get("section_path") or "").lower()
-        adjusted_rank = item["rank"] + next(
-            (
-                weight
-                for label, weight in SECTION_WEIGHTS.items()
-                if label in section_path
-            ),
-            0.0,
+    supporting_chunks = retrieve_supporting_chunks(
+        conn,
+        claim_text=args.query,
+        top_k=args.top_k,
+    )
+    chunk_rows = []
+    for item in supporting_chunks:
+        page_row = conn.execute(
+            "SELECT title, path FROM pages WHERE primary_source_id = ?",
+            (item["source_id"],),
+        ).fetchone()
+        chunk_rows.append(
+            {
+                **item,
+                "rank": item["fts_rank"],
+                "adjusted_rank": item["final_rank"],
+                "page_title": page_row["title"] if page_row else None,
+                "page_path": page_row["path"] if page_row else None,
+            }
         )
-        item["adjusted_rank"] = adjusted_rank
-        reranked_chunks.append(item)
-    reranked_chunks.sort(key=lambda item: item["adjusted_rank"])
-    reranked_chunks = reranked_chunks[: args.top_k]
+    conn.close()
 
     result = {
         "query": args.query,
         "pages": [dict(row) for row in pages],
         "claims": [dict(row) for row in claim_rows],
-        "chunks": reranked_chunks,
+        "chunks": chunk_rows,
     }
     print(json.dumps(result, indent=2))
 

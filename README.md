@@ -21,7 +21,7 @@ Implemented user-facing workflows:
 - `verify`
 - `publish`
 
-The current system is a working prototype with staged ingest, claim-aware retrieval, and inbox-to-publish workflow support.
+The current system is a working prototype with staged ingest, claim-aware retrieval, and direct-to-wiki page finalization.
 
 ## Requirements
 
@@ -36,16 +36,24 @@ uv sync
 
 ## Quick start
 
-### Add a paper as draft
+### Prepare a paper for drafting
 
 ```bash
 uv run scripts/hub.py add-source 1706.03762v7 --json
 ```
 
+This stages ingest and returns a bounded `draft_packet` plus a prepared JSON path for the coding agent to hand to one drafting subagent.
+
+### Finalize a staged draft
+
+```bash
+uv run scripts/hub.py ingest-finalize system/cache/prepared-<source-id>.json --draft-output-file <draft.json>
+```
+
 ### Add a paper and publish if verification passes
 
 ```bash
-uv run scripts/hub.py add-source 1706.03762v7 --publish-if-pass --json
+uv run scripts/hub.py add-source 1706.03762v7 --draft-output-file <draft.json> --publish-if-pass --json
 ```
 
 ### Ask a question
@@ -54,16 +62,16 @@ uv run scripts/hub.py add-source 1706.03762v7 --publish-if-pass --json
 uv run scripts/hub.py ask "attention" --json
 ```
 
-### Verify a draft page
+### Verify a wiki page
 
 ```bash
-uv run scripts/hub.py verify wiki/inbox/paper-foo.md --json
+uv run scripts/hub.py verify wiki/papers/paper-foo.md --json
 ```
 
-### Publish a verified inbox page
+### Mark a verified wiki page as published
 
 ```bash
-uv run scripts/hub.py publish wiki/inbox/paper-foo.md --json
+uv run scripts/hub.py publish wiki/papers/paper-foo.md --json
 ```
 
 ## Repository layout
@@ -87,7 +95,8 @@ docs/user/  user-facing documentation
 
 - Raw sources are immutable.
 - Markdown pages are the human-facing artifact.
-- Drafts normally land in `wiki/inbox/` unless you use `--publish-if-pass` and verification succeeds.
+- `add-source` now stages ingest and returns `needs-draft` unless you provide `--draft-output-file` or `--draft-output-stdin`.
+- `ingest-finalize` writes the canonical wiki page directly into its target wiki folder with review status in frontmatter.
 - Verification and synthesis are still improving; current verification is stronger than before but not yet deeply semantic.
 - The repository supports external drafter handoff, but the top-level model orchestration remains the responsibility of the coding CLI agent.
 

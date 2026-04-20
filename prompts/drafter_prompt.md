@@ -14,20 +14,42 @@ Return JSON only, with this shape:
 
 ```json
 {
-  "summary": {
+  "big_picture": {
     "text": "...",
     "chunk_ids": ["src_..._chunk_00001"]
   },
-  "key_points": [
+  "main_contributions": [
     {
       "text": "...",
       "chunk_ids": ["src_..._chunk_00002"]
     }
   ],
-  "limitations": [
+  "main_results": [
     {
       "text": "...",
       "chunk_ids": ["src_..._chunk_00003"]
+    }
+  ],
+  "method_overview": {
+    "text": "...",
+    "chunk_ids": ["src_..._chunk_00004"]
+  },
+  "detailed_findings": [
+    {
+      "text": "...",
+      "chunk_ids": ["src_..._chunk_00005"]
+    }
+  ],
+  "limitations": [
+    {
+      "text": "...",
+      "chunk_ids": ["src_..._chunk_00006"]
+    }
+  ],
+  "open_questions": [
+    {
+      "text": "...",
+      "chunk_ids": ["src_..._chunk_00007"]
     }
   ]
 }
@@ -35,11 +57,13 @@ Return JSON only, with this shape:
 
 ## Rules
 
-- Summary must be non-empty.
+- `big_picture` must be non-empty.
+- Include at least 1 `main_contributions` item and at least 1 `main_results` item when the packet supports them.
 - Use only `chunk_ids` present in the packet.
 - Every substantive statement must have supporting `chunk_ids`.
 - Keep wording conservative.
-- Prefer 1 summary, up to 5 key points, and up to 3 limitations.
+- Follow the packet `drafting_rules` and prefer the packet `candidate_groups`.
+- Prefer 1 big picture section, up to 5 contributions, up to 5 results, 1 method overview, up to 6 detailed findings, up to 4 limitations, and up to 4 open questions.
 - Do not output markdown.
 - Do not output explanations.
 - Do not use outside knowledge.
@@ -57,3 +81,10 @@ Return JSON only, with this shape:
 
 - reduce confidence in wording
 - omit unsupported points instead of guessing
+
+## Common Failure Cases To Avoid
+
+- Do not return sections with fewer than about 6 words unless they are truly unavoidable.
+- Do not repeat the same sentence across multiple sections.
+- Do not reuse the same `chunk_ids` for nearly every section if other evidence exists in the packet.
+- Do not leave substantive sections empty when the packet contains clear candidate evidence.

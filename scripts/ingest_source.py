@@ -16,22 +16,25 @@ from urllib.request import Request, urlopen
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
 
-from _drafter import DraftOutput, build_draft_packet, run_drafter
+from _drafter import DraftOutput, build_draft_packet, run_drafter, summarize_paragraph
 from _common import (
     RAW_EXTRACTED_DIR,
     RAW_HTML_DIR,
     RAW_PAPERS_DIR,
     ROOT,
-    WIKI_INBOX_DIR,
+    SYSTEM_CACHE_DIR,
     append_log,
     connect_db,
     ensure_workspace,
     ensure_index_entry,
     init_db,
     make_id,
+    normalize_claim_text,
     rebuild_fts,
+    retrieve_supporting_chunks,
     slugify,
     split_text_into_chunks,
+    target_dir_for_page_type,
     utc_now,
 )
 
@@ -221,9 +224,143 @@ def clean_page_text(text: str) -> str:
     if current_lines:
         paragraphs.append(" ".join(current_lines).strip())
 
-    cleaned = "\n\n".join(p for p in paragraphs if p)
+    filtered_paragraphs = [normalize_pdf_paragraph(p) for p in paragraphs if p]
+    filtered_paragraphs = [p for p in filtered_paragraphs if p and not is_noncontent_paragraph(p)]
+    cleaned = "\n\n".join(filtered_paragraphs)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = trim_leading_front_matter(cleaned)
+    cleaned = normalize_embedded_section_boundaries(cleaned)
+    cleaned = merge_broken_paragraphs(cleaned)
     return cleaned.strip()
+
+
+def normalize_pdf_paragraph(paragraph: str) -> str:
+    cleaned = paragraph.strip()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"^\d+\s*$", "", cleaned)
+    cleaned = re.sub(
+        r"^(?:page\s+)?\d+\s+(?:of\s+\d+\s+)?$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"^\d+\s+(?=[A-Z][a-z])", "", cleaned)
+    cleaned = re.sub(r"\bAbstract\b\s*", "Abstract\n\n", cleaned, count=1)
+    cleaned = re.sub(
+        r"^(Abstract|Introduction|Background|Related Work|Methods?|Materials and Methods|Approach|Model Architecture|Architecture|Experiments?|Evaluation|Results?|Discussion|Conclusions?|Limitations?|Future Work|Appendix)\s+(?=[A-Z])",
+        r"\1\n\n",
+        cleaned,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\b(\d+(?:\.\d+)*)\s+(Introduction|Background|Related Work|Method|Methods|Approach|Model Architecture|Experiments|Results|Discussion|Conclusion|Conclusions|Limitations|Future Work)\b",
+        r"\n\n\1 \2\n\n",
+        cleaned,
+        count=1,
+    )
+    cleaned = re.sub(
+        r"^((?:section\s+)?\d+(?:\.\d+)*)\s+([A-Z][A-Za-z0-9][A-Za-z0-9 ,/&()\-]{2,80})\s+(?=[A-Z])",
+        r"\1 \2\n\n",
+        cleaned,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    return cleaned.strip()
+
+
+def is_noncontent_paragraph(paragraph: str) -> bool:
+    lowered = paragraph.lower()
+    if "permission to reproduce" in lowered:
+        return True
+    if "all rights reserved" in lowered or "copyright" in lowered:
+        return True
+    if "work performed while" in lowered:
+        return True
+    if lowered.count("@") >= 2:
+        return True
+    if len(re.findall(r"\bdepartment\b|\buniversity\b|\binstitute\b|\bschool\b|\blaboratory\b", lowered)) >= 4:
+        return True
+    if re.fullmatch(r"(figure|table)\s+\d+[:.].*", lowered):
+        return True
+    if re.fullmatch(r"(references?|acknowledg(e)?ments?)", lowered):
+        return True
+    if re.fullmatch(r"\d+(?:\.\d+)*", lowered):
+        return True
+    if re.fullmatch(
+        r"(abstract|introduction|background|related work|methods?|materials(?: and methods)?|approach|model architecture|architecture|experiments?|evaluation|results?|discussion|conclusions?|limitations?|future work|appendix)",
+        lowered,
+    ):
+        return True
+    if lowered.startswith("references [1]") or "arxiv preprint arxiv:" in lowered:
+        return True
+    if bool(re.match(r"^\[\d+\]\s+[a-z]", lowered)):
+        return True
+    if len(re.findall(r"\bvol\.?\b|\bno\.?\b|\bpp\.?\b|\bdoi\b", lowered)) >= 3:
+        return True
+    return False
+
+
+def trim_leading_front_matter(text: str) -> str:
+    match = re.search(
+        r"\b(Abstract|1\s+Introduction|Introduction)\b",
+        text[:6000],
+        re.IGNORECASE,
+    )
+    if match and match.start() > 0:
+        return text[match.start() :].strip()
+    return text
+
+
+def normalize_embedded_section_boundaries(text: str) -> str:
+    normalized = re.sub(
+        r"\s+(?=(?:\d+(?:\.\d+)*\s+)?(?:Abstract|Introduction|Background|Related Work|Method|Methods|Approach|Model Architecture|Experiments|Results|Discussion|Conclusion|Conclusions|Limitations|Future Work)\b)",
+        "\n\n",
+        text,
+    )
+    normalized = re.sub(
+        r"\s+(?=(?:section\s+)?\d+(?:\.\d+)*\s+[A-Z][A-Za-z0-9][A-Za-z0-9 ,/&()\-]{2,80}\b)",
+        "\n\n",
+        normalized,
+    )
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized.strip()
+
+
+def merge_broken_paragraphs(text: str) -> str:
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    if not paragraphs:
+        return ""
+
+    merged: list[str] = []
+    for paragraph in paragraphs:
+        if not merged:
+            merged.append(paragraph)
+            continue
+
+        previous = merged[-1]
+        previous_is_heading = is_heading_candidate(previous)
+        current_is_heading = is_heading_candidate(paragraph)
+        previous_ends_sentence = bool(re.search(r'[.!?]["\')\]]?$', previous))
+        current_looks_continuation = bool(
+            re.match(r"^(?:\d+(?:\.\d+)?|[a-z(\[])", paragraph)
+        )
+        current_starts_new_section = current_is_heading
+
+        if previous_is_heading or current_is_heading:
+            merged.append(paragraph)
+            continue
+        if current_starts_new_section:
+            merged.append(paragraph)
+            continue
+        if not previous_ends_sentence or current_looks_continuation:
+            merged[-1] = f"{previous} {paragraph}".strip()
+            continue
+        merged.append(paragraph)
+
+    return "\n\n".join(merged)
 
 
 def normalize_inline_text(value: str | None) -> str | None:
@@ -348,17 +485,273 @@ def extraction_quality(
     return "high", notes + ["Extraction looks strong enough for draft retrieval."]
 
 
-def detect_section_markers(text: str) -> list[tuple[int, str]]:
-    markers: list[tuple[int, str]] = []
-    pattern = re.compile(
-        r"(^|\n\n)(abstract|introduction|background|method(?:s)?|approach|results?|discussion|conclusion)s?\b[:.-]?",
+GENERIC_HEADING_TERMS = [
+    "Abstract",
+    "Introduction",
+    "Background",
+    "Related Work",
+    "Literature Review",
+    "Preliminaries",
+    "Problem Setup",
+    "Methods",
+    "Materials and Methods",
+    "Approach",
+    "Framework",
+    "Algorithm",
+    "Algorithms",
+    "Implementation",
+    "Model Architecture",
+    "Architecture",
+    "Training",
+    "Training Data",
+    "Data Collection",
+    "Experimental Setup",
+    "Setup",
+    "Analysis",
+    "Experiments",
+    "Evaluation",
+    "Results",
+    "Findings",
+    "Ablations",
+    "Case Study",
+    "Discussion",
+    "Limitations",
+    "Threats to Validity",
+    "Future Work",
+    "Conclusion",
+    "Conclusions",
+    "Appendix",
+    "Supplementary",
+    "Supplemental",
+]
+
+SECTION_ROLE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "abstract": ("abstract", "summary"),
+    "introduction": ("introduction",),
+    "background": (
+        "background",
+        "related work",
+        "literature review",
+        "preliminar",
+        "motivation",
+        "problem setup",
+    ),
+    "method": (
+        "method",
+        "materials",
+        "approach",
+        "framework",
+        "algorithm",
+        "implementation",
+        "architecture",
+        "model",
+        "training",
+        "optimizer",
+        "regularization",
+        "experimental setup",
+        "setup",
+        "data collection",
+        "procedure",
+        "proof",
+        "theorem",
+        "construction",
+    ),
+    "results": (
+        "result",
+        "finding",
+        "evaluation",
+        "experiment",
+        "ablation",
+        "case study",
+        "benchmark",
+        "comparison",
+        "variation",
+    ),
+    "discussion": ("discussion", "interpretation"),
+    "limitations": (
+        "limitation",
+        "threats to validity",
+        "future work",
+        "open questions",
+        "caveat",
+    ),
+    "conclusion": ("conclusion", "concluding"),
+    "appendix": ("appendix", "supplement", "supplementary"),
+}
+
+
+def normalize_heading_text(raw_heading: str) -> str:
+    heading = raw_heading.strip()
+    heading = re.sub(r"^(?:section\s+)?(?:\d+(?:\.\d+)*)\s*", "", heading, flags=re.IGNORECASE)
+    heading = re.sub(r"\s+", " ", heading)
+    heading = re.sub(r"[:.\-]+$", "", heading)
+    return heading.strip()
+
+
+def canonical_section_role(raw_heading: str) -> str | None:
+    normalized = normalize_heading_text(raw_heading).lower()
+    if not normalized:
+        return None
+    for role, keywords in SECTION_ROLE_KEYWORDS.items():
+        if any(keyword in normalized for keyword in keywords):
+            return role
+    return None
+
+
+def heading_level(raw_heading: str) -> int:
+    numbered = re.match(r"^(?:section\s+)?(\d+(?:\.\d+)*)\b", raw_heading.strip(), re.IGNORECASE)
+    if numbered:
+        return numbered.group(1).count(".") + 1
+    return 1
+
+
+def is_heading_candidate(paragraph: str) -> bool:
+    cleaned = paragraph.strip()
+    if not cleaned or len(cleaned) > 120:
+        return False
+    if cleaned.endswith((".", "?", "!")) and len(cleaned.split()) > 8:
+        return False
+    if canonical_section_role(cleaned):
+        return True
+    numbered = re.match(
+        r"^(?:section\s+)?(\d+(?:\.\d+)*)\s+(.+)$",
+        cleaned,
         re.IGNORECASE,
     )
-    for match in pattern.finditer(text):
+    if not numbered:
+        return False
+    body = numbered.group(2).strip()
+    if len(body.split()) > 8:
+        return False
+    if any(mark in body for mark in [",", ".", "?", "!", ";", ":"]):
+        return False
+    if len(re.findall(r"\d", body)) > 2:
+        return False
+    words = [word for word in re.split(r"\s+", body) if word]
+    if not words:
+        return False
+    heading_like_words = 0
+    for word in words:
+        bare = re.sub(r"[^A-Za-z0-9&()/\-]", "", word)
+        if not bare:
+            continue
+        if bare.isupper() or re.match(r"^[A-Z][a-z]+", bare):
+            heading_like_words += 1
+    return heading_like_words >= max(1, int(len(words) * 0.6))
+
+
+def section_path_from_stack(role: str, stack: list[dict[str, Any]], current_heading: str) -> str:
+    subheadings: list[str] = []
+    for item in stack:
+        heading = item["heading"]
+        item_role = item["role"]
+        if item_role == role:
+            continue
+        subheadings.append(heading.lower())
+    current_normalized = normalize_heading_text(current_heading).lower()
+    if current_normalized and current_normalized not in {role, *subheadings}:
+        subheadings.append(current_normalized)
+    if not subheadings:
+        return role
+    return " > ".join([role, *subheadings])
+
+
+def detect_section_markers(text: str) -> list[dict[str, Any]]:
+    heading_entries: list[dict[str, Any]] = []
+
+    heading_term_pattern = "|".join(
+        sorted((re.escape(term) for term in GENERIC_HEADING_TERMS), key=len, reverse=True)
+    )
+
+    numbered_canonical_pattern = re.compile(
+        rf"(?<![A-Za-z0-9])(?P<number>(?:section\s+)?\d+(?:\.\d+)*)\s+(?P<label>{heading_term_pattern})\b",
+        re.IGNORECASE,
+    )
+    for match in numbered_canonical_pattern.finditer(text):
+        offset = match.start()
+        raw_heading = f"{match.group('number') or ''}{match.group('label')}".strip()
+        heading_entries.append(
+            {
+                "offset": offset,
+                "raw_heading": raw_heading,
+                "role": canonical_section_role(raw_heading),
+                "level": heading_level(raw_heading),
+            }
+        )
+
+    canonical_pattern = re.compile(
+        rf"(^|\n\n)(?P<label>{heading_term_pattern})\b",
+        re.IGNORECASE,
+    )
+    for match in canonical_pattern.finditer(text):
         offset = match.start() + len(match.group(1))
-        label = match.group(2).lower()
-        markers.append((offset, label))
-    markers.sort(key=lambda item: item[0])
+        raw_heading = match.group("label").strip()
+        heading_entries.append(
+            {
+                "offset": offset,
+                "raw_heading": raw_heading,
+                "role": canonical_section_role(raw_heading),
+                "level": heading_level(raw_heading),
+            }
+        )
+
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    cursor = 0
+    for paragraph in paragraphs:
+        offset = text.find(paragraph, cursor)
+        if offset == -1:
+            offset = cursor
+        cursor = offset + len(paragraph)
+        if not is_heading_candidate(paragraph):
+            continue
+        raw_heading = paragraph.strip()
+        role = canonical_section_role(raw_heading)
+        if role is None and re.match(
+            r"^(?:section\s+)?\d+(?:\.\d+)*\b", raw_heading, re.IGNORECASE
+        ):
+            role = "body"
+        if role is None:
+            continue
+        heading_entries.append(
+            {
+                "offset": offset,
+                "raw_heading": raw_heading,
+                "role": role,
+                "level": heading_level(raw_heading),
+            }
+        )
+
+    heading_entries.sort(key=lambda item: (item["offset"], item["level"]))
+    deduped_entries: list[dict[str, Any]] = []
+    for entry in heading_entries:
+        if deduped_entries and abs(entry["offset"] - deduped_entries[-1]["offset"]) < 4:
+            previous = deduped_entries[-1]
+            previous_score = 1 if previous.get("role") not in {None, "body"} else 0
+            entry_score = 1 if entry.get("role") not in {None, "body"} else 0
+            if entry_score > previous_score:
+                deduped_entries[-1] = entry
+            continue
+        deduped_entries.append(entry)
+
+    markers: list[dict[str, Any]] = []
+    stack: list[dict[str, Any]] = []
+    for entry in deduped_entries:
+        role = entry["role"]
+        if role in {None, "body"}:
+            role = stack[-1]["role"] if stack else "body"
+        level = entry["level"]
+        while stack and stack[-1]["level"] >= level:
+            stack.pop()
+        heading_text = normalize_heading_text(entry["raw_heading"])
+        marker = {
+            "offset": entry["offset"],
+            "raw_heading": entry["raw_heading"],
+            "level": level,
+            "canonical_role": role,
+            "section_path": section_path_from_stack(role, stack, heading_text),
+        }
+        markers.append(marker)
+        stack.append({"level": level, "heading": heading_text, "role": role})
     return markers
 
 
@@ -380,33 +773,175 @@ def build_page_markdown(
     quality_label: str,
     quality_notes: list[str],
     draft: dict,
+    draft_packet: dict,
 ) -> str:
+    packet_chunk_lookup = {
+        chunk["chunk_id"]: chunk for chunk in draft_packet.get("chunks", [])
+    }
+
+    def clean_text(text: str | None) -> str:
+        cleaned = normalize_claim_text((text or "").strip())
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        return cleaned.strip()
+
+    def format_section(section: dict) -> str:
+        text = clean_text(section.get("text"))
+        if not text:
+            return "Not extracted yet."
+        return text
+
+    def humanize_section_path(section_path: str | None) -> str:
+        if not section_path:
+            return "Source text"
+
+        def humanize_segment(segment: str) -> str:
+            words = segment.split()
+            rendered: list[str] = []
+            for word in words:
+                if word.isdigit():
+                    rendered.append(word)
+                elif len(word) <= 4 and word.isalpha():
+                    rendered.append(word.upper())
+                else:
+                    rendered.append(word.capitalize())
+            return " ".join(rendered)
+
+        return " / ".join(humanize_segment(part) for part in section_path.split(" > "))
+
+    def evidence_lines(chunk_ids: list[str], *, fallback: str) -> str:
+        lines: list[str] = []
+        for chunk_id in chunk_ids:
+            chunk = packet_chunk_lookup.get(chunk_id)
+            if chunk is None:
+                continue
+            section_label = humanize_section_path(chunk.get("section_path"))
+            page_label = (
+                f", p.{chunk['page_num']}" if chunk.get("page_num") is not None else ""
+            )
+            excerpt = clean_text(
+                summarize_paragraph(chunk.get("chunk_text", ""), max_sentences=1)
+            )
+            if not excerpt:
+                continue
+            lines.append(f"- {section_label}{page_label}: {excerpt}")
+        return "\n".join(lines) if lines else fallback
+
+    def render_claim_sections(
+        items: list[dict],
+        *,
+        heading_prefix: str,
+        empty_text: str,
+        fallback: str,
+    ) -> str:
+        if not items:
+            return empty_text
+        blocks: list[str] = []
+        for index, item in enumerate(items, start=1):
+            text = clean_text(item.get("text"))
+            if not text:
+                continue
+            evidence_block = evidence_lines(
+                item.get("chunk_ids", []),
+                fallback=fallback,
+            )
+            blocks.append(
+                f"### {heading_prefix} {index}\n{text}\n\nSupport\n{evidence_block}"
+            )
+        return "\n\n".join(blocks) if blocks else empty_text
+
+    def render_bullet_sections(
+        items: list[dict],
+        *,
+        empty_text: str,
+        fallback: str,
+    ) -> str:
+        if not items:
+            return empty_text
+        blocks: list[str] = []
+        for item in items:
+            text = clean_text(item.get("text"))
+            if not text:
+                continue
+            evidence_block = evidence_lines(item.get("chunk_ids", []), fallback=fallback)
+            blocks.append(f"- {text}\n{evidence_block}")
+        return "\n\n".join(blocks) if blocks else empty_text
+
     locator_line = canonical_locator or "Unknown"
     authors_line = authors_or_creator or "Unknown"
     published_line = published_at or "Unknown"
-    source_url_line = source_url or "Unknown"
-    summary = draft["summary"]
-    overview_block = summary["text"]
-    quality_lines = "\n".join(f"- {note}" for note in quality_notes)
-    summary_chunks = ", ".join(f"`{chunk_id}`" for chunk_id in summary["chunk_ids"])
-    key_points = draft.get("key_points", [])
+    big_picture = draft["big_picture"]
+    method_overview = draft["method_overview"]
+    contributions = draft.get("main_contributions", [])
+    main_results = draft.get("main_results", [])
+    detailed_findings = draft.get("detailed_findings", [])
     limitations = draft.get("limitations", [])
-    key_points_block = (
-        "\n".join(
-            f"- {item['text']} _(evidence: {', '.join(f'`{chunk_id}`' for chunk_id in item['chunk_ids'])})_"
-            for item in key_points
-        )
-        if key_points
-        else "- No key points extracted yet."
+    open_questions = draft.get("open_questions", [])
+    contributions_block = render_claim_sections(
+        contributions,
+        heading_prefix="Contribution",
+        empty_text="No contribution claims extracted yet.",
+        fallback="- Supporting evidence is not linked yet.",
     )
-    limitations_block = (
-        "\n".join(
-            f"- {item['text']} _(evidence: {', '.join(f'`{chunk_id}`' for chunk_id in item['chunk_ids'])})_"
-            for item in limitations
-        )
-        if limitations
-        else "- No limitations extracted yet."
+    results_block = render_claim_sections(
+        main_results,
+        heading_prefix="Result",
+        empty_text="No main results extracted yet.",
+        fallback="- Supporting evidence is not linked yet.",
     )
+    detailed_findings_block = render_claim_sections(
+        detailed_findings,
+        heading_prefix="Detail",
+        empty_text="No detailed findings extracted yet.",
+        fallback="- Supporting evidence is not linked yet.",
+    )
+    limitations_block = render_bullet_sections(
+        limitations,
+        empty_text="No limitations extracted yet.",
+        fallback="  - Supporting evidence is not linked yet.",
+    )
+    open_questions_block = (
+        "\n".join(
+            f"- {clean_text(item['text'])}"
+            for item in open_questions
+            if clean_text(item.get("text"))
+        )
+        if open_questions
+        else "- No explicit open questions extracted yet."
+    )
+    evidence_map_lines = []
+    for label, items in [
+        ("Big Picture", [big_picture]),
+        ("Main Contributions", contributions),
+        ("Main Results", main_results),
+    ]:
+        for item in items:
+            text = clean_text(item.get("text"))
+            if not text:
+                continue
+            evidence_map_lines.append(
+                f"### {label}\n{text}\n\nSupport\n{evidence_lines(item.get('chunk_ids', []), fallback='- Supporting evidence is not linked yet.')}"
+            )
+    evidence_map_block = (
+        "\n\n".join(evidence_map_lines)
+        if evidence_map_lines
+        else "No evidence map extracted yet."
+    )
+    provenance_lines = [
+        f"- Status: `needs-review`",
+        f"- Canonical locator: {locator_line}",
+        f"- Source ID: `{source_id}`",
+        f"- Version ID: `{version_id}`",
+        f"- Raw file: `{raw_rel}`",
+        f"- Extracted text: `{extracted_rel}`",
+        f"- Imported at: {utc_now()}",
+        f"- Parsed source kind: `{source_kind}`",
+        f"- Page count: {page_count}",
+        f"- Indexed chunks: {chunk_count}",
+        f"- Extraction quality: `{quality_label}`",
+    ]
+    if source_url:
+        provenance_lines.insert(4, f"- Parsed source URL: {source_url}")
+    quality_block = "\n".join(f"- {note}" for note in quality_notes)
     return f"""---
 title: {title}
 page_type: paper
@@ -418,55 +953,56 @@ verifier_status: pending
 
 # {title}
 
-## Source metadata
+- Authors: {authors_line}
+- Published: {published_line}
+- Status: `needs-review`
+- Canonical locator: {locator_line}
 
-- Source ID: `{source_id}`
-- Source Type: `paper`
-- Version ID: `{version_id}`
-- Authors / Creator: {authors_line}
-- Published At: {published_line}
-- Canonical Locator: {locator_line}
-- Parsed Source Kind: `{source_kind}`
-- Parsed Source URL: {source_url_line}
-- Imported At: {utc_now()}
-- Raw File: `{raw_rel}`
-- Parsed Snapshot: `{parsed_snapshot_rel}`
-- Extracted Text: `{extracted_rel}`
-- Page Count: {page_count}
-- Indexed Chunks: {chunk_count}
+## Big Picture
 
-## Extraction quality
+{format_section(big_picture)}
 
-- Quality: `{quality_label}`
-{quality_lines}
+## Main Contributions
 
-## Summary
+{contributions_block}
 
-> {overview_block}
+## Main Results
 
-- Summary evidence: {summary_chunks or "not available"}
+{results_block}
 
-## Key points
+## Method Overview
 
-{key_points_block}
+{format_section(method_overview)}
+
+## Evidence Map
+
+{evidence_map_block}
+
+## Experiments And Detailed Findings
+
+{detailed_findings_block}
 
 ## Limitations
 
 {limitations_block}
 
-## Evidence
+## Open Questions
 
-- Primary evidence lives in the extracted text file and chunk index.
-- Use `uv run scripts/retrieve_evidence.py "<query>"` to inspect supporting spans.
+{open_questions_block}
 
-## Notes
+## Provenance
 
-- This page was created by the initial ingest path and should remain in review until verified.
+{chr(10).join(provenance_lines)}
+
+## Extraction Notes
+
+{quality_block}
 """
 
 
 def reserve_page_target(conn, title: str, source_id: str) -> Path:
-    candidate = WIKI_INBOX_DIR / f"paper-{slugify(title)}.md"
+    target_dir = target_dir_for_page_type("paper")
+    candidate = target_dir / f"{slugify(title)}.md"
     suffix = source_id[-8:]
     while (
         candidate.exists()
@@ -476,7 +1012,7 @@ def reserve_page_target(conn, title: str, source_id: str) -> Path:
         ).fetchone()
         is not None
     ):
-        candidate = WIKI_INBOX_DIR / f"paper-{slugify(title)}-{suffix}.md"
+        candidate = target_dir / f"{slugify(title)}-{suffix}.md"
         suffix = suffix + "x"
     return candidate
 
@@ -646,6 +1182,7 @@ def prepare_ingest(
     )
 
     now = utc_now()
+    prepared_rel = str((SYSTEM_CACHE_DIR / f"prepared-{source_id}.json").relative_to(ROOT))
     conn.execute(
         """
         INSERT INTO sources (
@@ -758,6 +1295,13 @@ def prepare_ingest(
         "chunk_count": len(chunks),
         "quality_label": quality_label,
         "quality_notes": quality_notes,
+        "coordination": {
+            "drafter_prompt_path": "prompts/drafter_prompt.md",
+            "prepared_json_path": prepared_rel,
+            "finalize_command": f"uv run scripts/hub.py ingest-finalize {prepared_rel} --draft-output-file <draft.json> --json",
+            "verify_command": f"uv run scripts/hub.py verify {str(page_target.relative_to(ROOT))} --json",
+            "target_page_path": str(page_target.relative_to(ROOT)),
+        },
         "draft_packet": draft_packet,
         "status": "prepared",
     }
@@ -792,6 +1336,7 @@ def finalize_ingest(prepared: dict, draft_output: DraftOutput | None = None) -> 
         quality_label=quality_label,
         quality_notes=quality_notes,
         draft=draft,
+        draft_packet=prepared["draft_packet"],
     )
     page_target.write_text(page_markdown)
 
@@ -816,7 +1361,7 @@ def finalize_ingest(prepared: dict, draft_output: DraftOutput | None = None) -> 
 
     ensure_index_entry(page_target, prepared["title"])
     append_log(
-        f"Ingested paper '{prepared['title']}' using {prepared['source_kind']} into inbox as {prepared['page_path']}"
+        f"Ingested paper '{prepared['title']}' using {prepared['source_kind']} into {prepared['page_path']}"
     )
     return {
         "source_id": prepared["source_id"],
@@ -838,22 +1383,36 @@ def persist_draft_claims(conn, *, page_id: str, draft: DraftOutput) -> list[str]
     conn.execute("DELETE FROM claims WHERE page_id = ?", (page_id,))
 
     created: list[str] = []
+    page_row = conn.execute(
+        "SELECT primary_source_id FROM pages WHERE page_id = ?",
+        (page_id,),
+    ).fetchone()
+    source_id = page_row["primary_source_id"] if page_row is not None else None
 
     def insert_section(claim_type: str, text: str, chunk_ids: list[str]) -> None:
-        cleaned = text.strip()
+        cleaned = normalize_claim_text(text)
         if not cleaned:
             return
-        evidence_rows = []
-        for chunk_id in chunk_ids:
-            chunk_row = conn.execute(
-                "SELECT char_start, char_end FROM chunks WHERE chunk_id = ?",
-                (chunk_id,),
-            ).fetchone()
-            if chunk_row is None:
-                continue
-            evidence_rows.append(
-                (chunk_id, chunk_row["char_start"], chunk_row["char_end"])
+        evidence_rows = [
+            (item["chunk_id"], item["char_start"], item["char_end"])
+            for item in retrieve_supporting_chunks(
+                conn,
+                claim_text=cleaned,
+                source_id=source_id,
+                top_k=3,
             )
+        ]
+        if not evidence_rows:
+            for chunk_id in chunk_ids:
+                chunk_row = conn.execute(
+                    "SELECT char_start, char_end FROM chunks WHERE chunk_id = ?",
+                    (chunk_id,),
+                ).fetchone()
+                if chunk_row is None:
+                    continue
+                evidence_rows.append(
+                    (chunk_id, chunk_row["char_start"], chunk_row["char_end"])
+                )
         if not evidence_rows:
             return
         claim_id = make_id("claim", f"{claim_type}-{cleaned[:30]}")
@@ -874,9 +1433,12 @@ def persist_draft_claims(conn, *, page_id: str, draft: DraftOutput) -> list[str]
             )
         created.append(claim_id)
 
-    insert_section("summary", draft["summary"]["text"], draft["summary"]["chunk_ids"])
-    for item in draft.get("key_points", []):
-        insert_section("key_point", item["text"], item["chunk_ids"])
+    for item in draft.get("main_contributions", []):
+        insert_section("main_contribution", item["text"], item["chunk_ids"])
+    for item in draft.get("main_results", []):
+        insert_section("main_result", item["text"], item["chunk_ids"])
+    for item in draft.get("detailed_findings", []):
+        insert_section("detailed_finding", item["text"], item["chunk_ids"])
     for item in draft.get("limitations", []):
         insert_section("limitation", item["text"], item["chunk_ids"])
     return created

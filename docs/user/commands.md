@@ -27,7 +27,7 @@ uv run scripts/hub.py ask "<query>" [--json]
 
 ### `verify`
 
-Verify a draft page.
+Verify a wiki page.
 
 ```bash
 uv run scripts/hub.py verify <page-path> [--json]
@@ -35,7 +35,7 @@ uv run scripts/hub.py verify <page-path> [--json]
 
 ### `publish`
 
-Publish a verified inbox page.
+Mark a verified wiki page as published.
 
 ```bash
 uv run scripts/hub.py publish <page-path> [--json]

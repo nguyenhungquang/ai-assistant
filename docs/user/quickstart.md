@@ -12,7 +12,8 @@ uv sync
 uv run scripts/hub.py add-source 1706.03762v7 --json
 ```
 
-This creates a draft page in `wiki/inbox/`.
+This stages ingest, returns a bounded `draft_packet`, and prepares the final wiki page path.
+This stages ingest and returns a prepared handoff for one drafting subagent.
 
 ## 3. Add and publish if safe
 
@@ -20,7 +21,7 @@ This creates a draft page in `wiki/inbox/`.
 uv run scripts/hub.py add-source 1706.03762v7 --publish-if-pass --json
 ```
 
-This verifies automatically and publishes only if verification returns `pass`.
+This verifies automatically and marks the final wiki page as published only if verification returns `pass`.
 
 ## 4. Ask a question
 

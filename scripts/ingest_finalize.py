@@ -21,23 +21,29 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    prepared = json.loads(Path(args.prepared_json).read_text())
-    if "result" in prepared and isinstance(prepared["result"], dict):
-        prepared = prepared["result"]
-    draft_output = None
-    if args.draft_output_file and args.draft_output_stdin:
-        raise SystemExit(
-            "Use either --draft-output-file or --draft-output-stdin, not both."
-        )
-    if args.draft_output_file:
-        if args.draft_output_file == "-":
+    try:
+        prepared = json.loads(Path(args.prepared_json).read_text())
+        if "result" in prepared and isinstance(prepared["result"], dict):
+            prepared = prepared["result"]
+
+        draft_output = None
+        if args.draft_output_file and args.draft_output_stdin:
+            raise SystemExit(
+                "Use either --draft-output-file or --draft-output-stdin, not both."
+            )
+        if args.draft_output_file:
+            if args.draft_output_file == "-":
+                draft_output = json.loads(sys.stdin.read())
+            else:
+                draft_output = json.loads(Path(args.draft_output_file).read_text())
+        elif args.draft_output_stdin:
             draft_output = json.loads(sys.stdin.read())
-        else:
-            draft_output = json.loads(Path(args.draft_output_file).read_text())
-    elif args.draft_output_stdin:
-        draft_output = json.loads(sys.stdin.read())
-    payload = finalize_ingest(prepared, draft_output=draft_output)
-    print(json.dumps(payload, indent=2))
+        payload = finalize_ingest(prepared, draft_output=draft_output)
+        print(json.dumps(payload, indent=2))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Invalid JSON supplied to ingest-finalize: {exc}") from exc
+    except ValueError as exc:
+        raise SystemExit(f"Invalid draft output: {exc}") from exc
 
 
 if __name__ == "__main__":

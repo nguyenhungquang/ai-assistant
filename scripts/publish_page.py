@@ -16,17 +16,15 @@ from _common import (
     rebuild_fts,
     rebuild_index,
     replace_frontmatter_field,
-    slugify,
-    target_dir_for_page_type,
     utc_now,
 )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Promote a verified inbox page into the main wiki."
+        description="Mark a verified wiki page as published."
     )
-    parser.add_argument("page_path", help="Path to the inbox markdown page to publish")
+    parser.add_argument("page_path", help="Path to the markdown page to publish")
     return parser.parse_args()
 
 
@@ -47,9 +45,6 @@ def main() -> None:
     if not page_path.exists():
         print(f"Page not found: {page_path}", file=sys.stderr)
         raise SystemExit(2)
-    if ROOT / "wiki" / "inbox" not in [page_path.parent, *page_path.parents]:
-        print("Only inbox pages can be published.", file=sys.stderr)
-        raise SystemExit(2)
 
     verification = run_verifier(page_path)
     if verification["verdict"] != "pass":
@@ -61,13 +56,6 @@ def main() -> None:
 
     text = page_path.read_text()
     page_type = parse_frontmatter_value(text, "page_type") or "paper"
-    target_dir = target_dir_for_page_type(page_type)
-    if target_dir.name == "inbox":
-        print(
-            f"Unsupported publish target for page_type={page_type!r}", file=sys.stderr
-        )
-        raise SystemExit(2)
-
     rel_old = str(page_path.relative_to(ROOT))
 
     conn = connect_db()
@@ -81,18 +69,9 @@ def main() -> None:
         print(f"No page record found for {rel_old}", file=sys.stderr)
         raise SystemExit(2)
 
-    target_name = page_path.name
-    if page_path.name.startswith(f"{page_type}-"):
-        target_name = page_path.name[len(page_type) + 1 :]
-    target_path = target_dir / target_name
-    if target_path.exists() and target_path != page_path:
-        target_path = (
-            target_dir / f"{slugify(target_path.stem)}-{page_path.stem[-8:]}.md"
-        )
-
     updated = replace_frontmatter_field(text, "status", "published")
     updated = replace_frontmatter_field(updated, "verifier_status", "pass")
-    rel_new = str(target_path.relative_to(ROOT))
+    rel_new = rel_old
 
     conn.execute(
         "UPDATE pages SET path = ?, status = ?, updated_at = ? WHERE page_id = ?",
@@ -107,11 +86,9 @@ def main() -> None:
     conn.commit()
     conn.close()
 
-    target_path.write_text(updated)
-    if target_path != page_path:
-        page_path.unlink()
+    page_path.write_text(updated)
 
-    append_log(f"Published page '{target_path.stem}' to {rel_new}")
+    append_log(f"Published page '{page_path.stem}' at {rel_new}")
     print(
         json.dumps({"published_page": rel_new, "verification": verification}, indent=2)
     )
