@@ -64,12 +64,16 @@ Return JSON only, with this shape:
 - Every substantive statement must have supporting `chunk_ids`.
 - Keep wording conservative.
 - Follow the packet `drafting_rules` and prefer the packet `candidate_groups`.
+- Prefer `candidate_groups.method_overview_candidates` for `method_overview`.
+- Use `candidate_groups.method_equation_candidates` only when a key equation is central to explaining the method.
+- Use `candidate_groups.technical_method_candidates` in `detailed_findings`, not as the main `method_overview`, unless the packet lacks broader method evidence.
 - Prefer 1 big picture section, up to 5 contributions, up to 5 results, 1 method overview, up to 6 detailed findings, up to 4 limitations, and up to 4 open questions.
 - Do not output markdown.
 - Do not output explanations.
 - Do not use outside knowledge.
 - Do not invent evidence.
 - If the source contains equations or formal expressions, rewrite them using Obsidian-compatible math syntax with `$...$` or `$$...$$`.
+- If you use an equation in `method_overview`, explain in plain language what it does and keep it to at most 1-2 key equations.
 
 ## Style
 
@@ -91,4 +95,6 @@ Return JSON only, with this shape:
 - Do not reuse the same `chunk_ids` for nearly every section if other evidence exists in the packet.
 - Do not leave substantive sections empty when the packet contains clear candidate evidence.
 - Do not leave `method_overview` empty or fill it with headline results.
+- Do not make `method_overview` mostly equations, hyperparameters, training schedule details, or benchmark setup.
+- Do not include equations in `method_overview` unless they clarify the core mechanism.
 - Do not restate the same evidence block in multiple sections.

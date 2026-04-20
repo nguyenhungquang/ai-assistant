@@ -142,6 +142,32 @@ METHOD_CUES = [
     "approach",
     "method",
 ]
+METHOD_OVERVIEW_CUES = [
+    "we propose",
+    "we present",
+    "in this work",
+    "our approach",
+    "our method",
+    "framework",
+    "architecture",
+    "algorithm",
+    "pipeline",
+    "system",
+    "consists of",
+    "is based on",
+]
+METHOD_DETAIL_CUES = [
+    "training",
+    "optimizer",
+    "regularization",
+    "hyperparameter",
+    "learning rate",
+    "batch",
+    "dataset",
+    "evaluation",
+    "baseline",
+    "implementation",
+]
 LIMITATION_CUES = [
     "limitation",
     "future work",
@@ -182,6 +208,15 @@ NOISE_CUES = [
     "corresponding author",
     "author affiliations",
     "arxiv:",
+]
+EQUATION_CUES = [
+    "softmax",
+    "argmax",
+    "attention(",
+    "ffn(",
+    "loss",
+    "objective",
+    "probability",
 ]
 
 
@@ -248,6 +283,25 @@ def build_draft_packet(
         limit=4,
         role="method",
     )
+    method_overview_chunks = pick_chunks(
+        packet_chunks,
+        predicate=lambda chunk: is_method_overview_like(chunk),
+        limit=4,
+        role="method_overview",
+    )
+    method_equation_chunks = pick_chunks(
+        packet_chunks,
+        predicate=lambda chunk: text_matches(chunk, METHOD_CUES)
+        and is_equation_heavy(chunk),
+        limit=4,
+        role="method_equation",
+    )
+    technical_method_chunks = pick_chunks(
+        packet_chunks,
+        predicate=lambda chunk: text_matches(chunk, METHOD_CUES),
+        limit=6,
+        role="method",
+    )
     detail_chunks = pick_chunks(
         packet_chunks,
         predicate=lambda chunk: (
@@ -290,6 +344,27 @@ def build_draft_packet(
         limit=4,
         role="method",
         top_chunk_limit=4,
+    )
+    method_overview_candidates = pick_candidate_spans(
+        method_overview_chunks,
+        predicate=lambda _chunk: True,
+        limit=4,
+        role="method_overview",
+        top_chunk_limit=4,
+    )
+    method_equation_candidates = pick_candidate_spans(
+        method_equation_chunks,
+        predicate=lambda _chunk: True,
+        limit=4,
+        role="method_equation",
+        top_chunk_limit=4,
+    )
+    technical_method_candidates = pick_candidate_spans(
+        technical_method_chunks,
+        predicate=lambda _chunk: True,
+        limit=6,
+        role="method",
+        top_chunk_limit=6,
     )
     detail_candidates = pick_candidate_spans(
         detail_chunks,
@@ -347,6 +422,7 @@ def build_draft_packet(
             "Use only packet chunk IDs for evidence linkage.",
             "Prefer plain-English synthesis over copied source text when possible.",
             "Method Overview must explain how the paper works using method evidence, not result evidence.",
+            "Use equations to clarify the method only when they are central; explain them in plain language instead of turning Method Overview into a derivation dump.",
             "If the source contains equations or formal expressions, render them using Obsidian-compatible math syntax with $...$ or $$...$$.",
         ],
         "draft_template": (
@@ -358,7 +434,10 @@ def build_draft_packet(
             "big_picture_candidates": bundle_candidates(big_picture_candidates),
             "main_contribution_candidates": bundle_candidates(contribution_candidates),
             "main_result_candidates": bundle_candidates(result_candidates),
+            "method_overview_candidates": bundle_candidates(method_overview_candidates),
+            "method_equation_candidates": bundle_candidates(method_equation_candidates),
             "method_candidates": bundle_candidates(method_candidates),
+            "technical_method_candidates": bundle_candidates(technical_method_candidates),
             "detailed_finding_candidates": bundle_candidates(detail_candidates),
             "limitation_candidates": bundle_candidates(limitation_candidates),
         },
@@ -393,6 +472,10 @@ def candidate_signals(chunk: DraftChunk) -> list[str]:
         signals.append("cue:contribution")
     if text_matches(chunk, METHOD_CUES):
         signals.append("cue:method")
+    if text_matches(chunk, METHOD_OVERVIEW_CUES):
+        signals.append("cue:method-overview")
+    if is_equation_heavy(chunk) or text_matches(chunk, EQUATION_CUES):
+        signals.append("cue:equation")
     if text_matches(chunk, LIMITATION_CUES):
         signals.append("cue:limitation")
     if text_matches(chunk, DETAIL_CUES):
@@ -416,6 +499,21 @@ def is_result_like(chunk: DraftChunk) -> bool:
             text,
         )
     )
+
+
+def is_equation_heavy(chunk: DraftChunk) -> bool:
+    text = chunk["chunk_text"]
+    return len(re.findall(r"(?:=|\\|√|∈|∑|β|ϵ|α|λ|\bO\()", text)) >= 4
+
+
+def is_method_overview_like(chunk: DraftChunk) -> bool:
+    section = (chunk.get("section_path") or "").lower()
+    if any(label in section for label in {"method", "approach", "framework", "architecture"}):
+        if text_matches(chunk, METHOD_OVERVIEW_CUES):
+            return True
+        if not text_matches(chunk, METHOD_DETAIL_CUES) and not is_equation_heavy(chunk):
+            return True
+    return text_matches(chunk, METHOD_OVERVIEW_CUES) and not is_equation_heavy(chunk)
 
 
 def is_reference_like(chunk: DraftChunk) -> bool:
@@ -598,6 +696,20 @@ def role_sentence_score(sentence: str, role: str) -> int:
     elif role == "method":
         if any(cue in lowered for cue in METHOD_CUES):
             score += 5
+    elif role == "method_overview":
+        if any(cue in lowered for cue in METHOD_OVERVIEW_CUES):
+            score += 6
+        if any(cue in lowered for cue in METHOD_DETAIL_CUES):
+            score -= 2
+        if any(cue in lowered for cue in RESULT_CUES):
+            score -= 2
+    elif role == "method_equation":
+        if any(cue in lowered for cue in EQUATION_CUES):
+            score += 4
+        if re.search(r"(?:=|\\|√|∈|∑|β|ϵ|α|λ|\bO\()", sentence):
+            score += 4
+        if any(cue in lowered for cue in RESULT_CUES):
+            score -= 2
     elif role == "detail":
         if any(cue in lowered for cue in DETAIL_CUES):
             score += 4
@@ -730,6 +842,24 @@ def candidate_score(chunk: DraftChunk, role: str) -> int:
             score += 4
         if is_result_like(chunk):
             score -= 1
+    elif role == "method_overview":
+        score += section_score(chunk, {"method", "approach", "architecture", "framework"})
+        if text_matches(chunk, METHOD_OVERVIEW_CUES):
+            score += 5
+        if text_matches(chunk, METHOD_DETAIL_CUES):
+            score -= 2
+        if is_result_like(chunk):
+            score -= 3
+        if is_equation_heavy(chunk):
+            score -= 4
+    elif role == "method_equation":
+        score += section_score(chunk, {"method", "approach", "architecture", "framework"})
+        if is_equation_heavy(chunk):
+            score += 6
+        if text_matches(chunk, EQUATION_CUES):
+            score += 3
+        if is_result_like(chunk):
+            score -= 3
     elif role == "detail":
         score += section_score(chunk, {"results", "discussion", "method"})
         if text_matches(chunk, DETAIL_CUES):
@@ -850,6 +980,12 @@ def draft_from_packet(packet: DraftPacket) -> DraftOutput:
         ),
         chunks[0] if chunks else None,
     )
+    method_overview_candidates = pick_chunks(
+        chunks,
+        predicate=lambda chunk: is_method_overview_like(chunk),
+        limit=2,
+        role="method_overview",
+    )
     method_candidates = pick_chunks(
         chunks,
         predicate=lambda chunk: text_matches(chunk, METHOD_CUES),
@@ -857,7 +993,7 @@ def draft_from_packet(packet: DraftPacket) -> DraftOutput:
         role="method",
     )
     method_chunk = next(
-        iter(method_candidates),
+        iter(method_overview_candidates or method_candidates),
         chunks[1] if len(chunks) > 1 else big_picture_chunk,
     )
     contribution_chunks = pick_chunks(
@@ -914,7 +1050,7 @@ def draft_from_packet(packet: DraftPacket) -> DraftOutput:
             result_chunks[:3], role="result", max_sentences=1
         ),
         "method_overview": make_section(
-            method_chunk, role="method", max_sentences=2
+            method_chunk, role="method_overview", max_sentences=2
         ),
         "detailed_findings": make_sections(
             detail_chunks[:4], role="detail", max_sentences=1
@@ -944,6 +1080,7 @@ def validate_draft_output(
 ) -> DraftOutput:
     allowed_chunk_ids = {chunk["chunk_id"] for chunk in packet["chunks"]}
     allowed_chunk_id_count = max(len(allowed_chunk_ids), 1)
+    chunk_lookup = {chunk["chunk_id"]: chunk for chunk in packet["chunks"]}
 
     def normalize_section(section: object, *, allow_empty: bool = False) -> DraftSection:
         if not isinstance(section, dict):
@@ -1036,6 +1173,8 @@ def validate_draft_output(
         raise ValueError("external draft output must include a non-empty method_overview")
     if strict and not normalized["method_overview"]["chunk_ids"]:
         raise ValueError("external draft output must link method_overview to at least one supporting chunk_id")
+    if strict and word_count(normalized["method_overview"]["text"]) < 12:
+        raise ValueError("method_overview is too short to explain how the paper works")
 
     for name, section in nonempty_sections:
         text = section["text"]
@@ -1067,6 +1206,29 @@ def validate_draft_output(
     unique_chunk_ratio = len(chunk_usage) / allowed_chunk_id_count
     if strict and chunk_usage and unique_chunk_ratio < 0.1:
         raise ValueError("draft output uses too narrow a slice of the available evidence")
+
+    if strict:
+        method_text = normalized["method_overview"]["text"]
+        method_chunks = [
+            chunk_lookup[chunk_id]
+            for chunk_id in normalized["method_overview"]["chunk_ids"]
+            if chunk_id in chunk_lookup
+        ]
+        if method_chunks:
+            if all(is_result_like(chunk) for chunk in method_chunks):
+                raise ValueError(
+                    "method_overview relies on result-oriented evidence instead of method evidence"
+                )
+            if all(is_equation_heavy(chunk) for chunk in method_chunks):
+                raise ValueError(
+                    "method_overview relies too heavily on equation-like chunks; use explanatory method text instead"
+                )
+        if text_matches({"chunk_text": method_text}, METHOD_DETAIL_CUES) and not text_matches(
+            {"chunk_text": method_text}, METHOD_OVERVIEW_CUES
+        ):
+            raise ValueError(
+                "method_overview focuses on narrow technical details instead of explaining the overall approach"
+            )
 
     return normalized
 
