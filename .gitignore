@@ -21,6 +21,7 @@ venv/
 docs-internal/
 
 # Local runtime state
+config.env
 system/state.db
 system/cache/*
 !system/cache/.gitkeep

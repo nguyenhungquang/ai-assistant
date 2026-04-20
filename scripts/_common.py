@@ -4,9 +4,11 @@ import re
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CONFIG_PATH = ROOT / "config.env"
 RAW_PAPERS_DIR = ROOT / "raw" / "papers"
 RAW_HTML_DIR = ROOT / "raw" / "html"
 RAW_POSTS_DIR = ROOT / "raw" / "posts"
@@ -23,6 +25,8 @@ SYSTEM_CACHE_DIR = SYSTEM_DIR / "cache"
 DB_PATH = SYSTEM_DIR / "state.db"
 INDEX_PATH = ROOT / "index.md"
 LOG_PATH = ROOT / "log.md"
+DEFAULT_MODE = "deploy"
+ALLOWED_MODES = {"dev", "deploy"}
 
 
 SCHEMA_STATEMENTS = [
@@ -140,12 +144,70 @@ def utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
+def ensure_runtime_config() -> Path:
+    if not CONFIG_PATH.exists():
+        CONFIG_PATH.write_text(
+            "# paper-hub runtime config\n"
+            "# MODE controls agent edit permissions.\n"
+            "# dev: agent may edit scripts/ and prompts/\n"
+            "# deploy: agent must only use scripts/ and prompts/, not edit them\n"
+            f"MODE={DEFAULT_MODE}\n"
+        )
+    return CONFIG_PATH
+
+
+def load_runtime_config() -> dict[str, str]:
+    ensure_runtime_config()
+    config: dict[str, str] = {}
+    for raw_line in CONFIG_PATH.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        config[key.strip()] = value.strip()
+    mode = config.get("MODE", DEFAULT_MODE).lower()
+    if mode not in ALLOWED_MODES:
+        raise ValueError(
+            f"Unsupported MODE in {CONFIG_PATH}: {mode!r}. Expected one of {sorted(ALLOWED_MODES)}"
+        )
+    config["MODE"] = mode
+    return config
+
+
+def get_runtime_mode() -> str:
+    return load_runtime_config()["MODE"]
+
+
+def agent_edit_policy() -> dict[str, Any]:
+    mode = get_runtime_mode()
+    if mode == "dev":
+        return {
+            "mode": mode,
+            "can_edit": ["scripts/**", "prompts/**"],
+            "must_not_edit": [],
+            "notes": [
+                "Development mode is active.",
+                "The agent may edit scripts/ and prompts/ when needed.",
+            ],
+        }
+    return {
+        "mode": mode,
+        "can_edit": [],
+        "must_not_edit": ["scripts/**", "prompts/**"],
+        "notes": [
+            "Deploy mode is active.",
+            "The agent must use scripts/ and prompts/ without editing them.",
+        ],
+    }
+
+
 def slugify(value: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip().lower()).strip("-")
     return slug or "untitled"
 
 
 def ensure_workspace() -> None:
+    ensure_runtime_config()
     for path in [
         RAW_PAPERS_DIR,
         RAW_HTML_DIR,

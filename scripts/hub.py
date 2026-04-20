@@ -9,6 +9,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from _common import agent_edit_policy, ensure_runtime_config, get_runtime_mode
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = ROOT / "scripts"
@@ -51,6 +53,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     draft_handoff.add_argument("prepared_json")
     draft_handoff.add_argument("--json", action="store_true")
+
+    config_cmd = subparsers.add_parser(
+        "config", help="Show the runtime config and current agent mode"
+    )
+    config_cmd.add_argument("--json", action="store_true")
 
     ingest_finalize = subparsers.add_parser(
         "ingest-finalize",
@@ -335,6 +342,8 @@ def handle_draft_handoff(args: argparse.Namespace) -> tuple[int, dict]:
         "description": (
             "Canonical external-drafter handoff. Give payload.draft_packet to one drafting subagent, require it to read draft_packet.full_paper_text before drafting, return JSON-only output matching expected_output_schema, then pass the returned file into finalize_command."
         ),
+        "workspace_mode": get_runtime_mode(),
+        "agent_policy": agent_edit_policy(),
         "prompt_path": normalize_path(str(prompt_path)),
         "prompt_text": prompt_text,
         "payload": {
@@ -399,6 +408,8 @@ def handle_add_source(args: argparse.Namespace) -> tuple[int, dict]:
                 "page_id": prepared_payload.get("page_id"),
                 "page_path": prepared_payload.get("page_path"),
                 "source_kind": prepared_payload.get("source_kind"),
+                "workspace_mode": get_runtime_mode(),
+                "agent_policy": agent_edit_policy(),
                 "chunk_count": prepared_payload.get("chunk_count"),
                 "prepared_json": normalize_path(str(prepared_path)),
                 "coordination": prepared_payload.get("coordination"),
@@ -662,7 +673,26 @@ def handle_publish(args: argparse.Namespace) -> tuple[int, dict]:
     return 0, response
 
 
+def handle_config(args: argparse.Namespace) -> tuple[int, dict]:
+    config_path = ensure_runtime_config()
+    response = envelope(
+        command="config",
+        ok=True,
+        status="ready",
+        issues=[],
+        warnings=[],
+        result={
+            "config_path": normalize_path(str(config_path)),
+            "workspace_mode": get_runtime_mode(),
+            "agent_policy": agent_edit_policy(),
+        },
+        writes={"config": normalize_path(str(config_path))},
+    )
+    return 0, response
+
+
 def main() -> None:
+    ensure_runtime_config()
     parser = build_parser()
     args = parser.parse_args()
 
@@ -672,6 +702,7 @@ def main() -> None:
         "ask": handle_ask,
         "ingest-prepare": handle_ingest_prepare,
         "draft-handoff": handle_draft_handoff,
+        "config": handle_config,
         "ingest-finalize": handle_ingest_finalize,
         "retrieve": handle_retrieve,
         "verify": handle_verify,

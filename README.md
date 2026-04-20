@@ -34,6 +34,25 @@ The current system is a working prototype with staged ingest, claim-aware retrie
 uv sync
 ```
 
+## Runtime config
+
+On first run, the project creates `config.env` at the repo root with:
+
+```bash
+MODE=deploy
+```
+
+Supported values:
+
+- `deploy`: the agent must use existing `scripts/` and `prompts/` without editing them
+- `dev`: the agent may edit `scripts/` and `prompts/`
+
+Inspect the current mode with:
+
+```bash
+uv run scripts/hub.py config --json
+```
+
 ## Quick start
 
 ### Prepare a paper for drafting
