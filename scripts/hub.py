@@ -333,7 +333,7 @@ def handle_draft_handoff(args: argparse.Namespace) -> tuple[int, dict]:
     handoff = {
         "handoff_version": "v1",
         "description": (
-            "Canonical external-drafter handoff. Give payload.draft_packet to one bounded drafting subagent, require JSON-only output matching expected_output_schema, then pass the returned file into finalize_command."
+            "Canonical external-drafter handoff. Give payload.draft_packet to one drafting subagent, require it to read draft_packet.full_paper_text before drafting, return JSON-only output matching expected_output_schema, then pass the returned file into finalize_command."
         ),
         "prompt_path": normalize_path(str(prompt_path)),
         "prompt_text": prompt_text,
@@ -391,7 +391,7 @@ def handle_add_source(args: argparse.Namespace) -> tuple[int, dict]:
             status="needs-draft",
             issues=[],
             warnings=[
-                "Prepared ingest is staged. Top-level coordinator should hand result.draft_packet to one bounded drafting subagent, then call ingest-finalize with the structured draft output."
+                "Prepared ingest is staged. Top-level coordinator should hand result.draft_packet to one drafting subagent, require it to read the full paper text in the packet first, then call ingest-finalize with the structured draft output."
             ],
             result={
                 "source_id": prepared_payload.get("source_id"),

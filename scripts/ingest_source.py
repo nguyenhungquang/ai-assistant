@@ -1259,6 +1259,7 @@ def prepare_ingest(
         canonical_locator=canonical_locator,
         quality_label=quality_label,
         quality_notes=quality_notes,
+        full_paper_text=extracted_text,
         chunks=chunks,
         section_blocks=section_blocks,
     )

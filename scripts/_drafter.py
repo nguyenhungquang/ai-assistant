@@ -24,6 +24,7 @@ class DraftPacket(TypedDict):
     extraction_quality: str
     extraction_notes: list[str]
     paper_metadata: dict
+    full_paper_text: str
     drafting_rules: list[str]
     draft_template: str
     candidate_groups: dict
@@ -249,6 +250,7 @@ def build_draft_packet(
     canonical_locator: str | None,
     quality_label: str,
     quality_notes: list[str],
+    full_paper_text: str,
     chunks: list[DraftChunk],
     section_blocks: dict | None = None,
 ) -> DraftPacket:
@@ -270,23 +272,7 @@ def build_draft_packet(
             if len(target) >= limit:
                 break
 
-    selected: list[DraftChunk] = []
-    extend_unique(
-        selected,
-        [chunk for chunk in ranked_chunks if has_section_ancestry(chunk, {"abstract", "introduction"})],
-        3,
-    )
-    extend_unique(
-        selected,
-        [chunk for chunk in ranked_chunks if has_section_ancestry(chunk, {"method"})],
-        7,
-    )
-    extend_unique(
-        selected,
-        [chunk for chunk in ranked_chunks if has_section_ancestry(chunk, {"results", "discussion", "conclusion"})],
-        11,
-    )
-    extend_unique(selected, ranked_chunks, 12)
+    selected = ranked_chunks
     packet_chunks = [
         {
             **chunk,
@@ -488,8 +474,10 @@ def build_draft_packet(
             "canonical_locator": canonical_locator,
             "source_kind": source_kind,
         },
+        "full_paper_text": full_paper_text,
         "drafting_rules": [
             "Write for a human reader using a top-down structure.",
+            "Read the full paper text before drafting; do not rely only on the candidate groups.",
             "Start with high-level ideas and main contributions before details.",
             "Do not invent facts or use evidence outside this packet.",
             "Use only packet chunk IDs for evidence linkage.",
@@ -1217,7 +1205,6 @@ def validate_draft_output(
     packet: DraftPacket, draft_output: DraftOutput, *, strict: bool = False
 ) -> DraftOutput:
     allowed_chunk_ids = {chunk["chunk_id"] for chunk in packet["chunks"]}
-    allowed_chunk_id_count = max(len(allowed_chunk_ids), 1)
     chunk_lookup = {chunk["chunk_id"]: chunk for chunk in packet["chunks"]}
 
     def normalize_section(section: object, *, allow_empty: bool = False) -> DraftSection:
@@ -1341,9 +1328,11 @@ def validate_draft_output(
             f"chunk_id {worst_chunk} is reused too broadly across sections: {users}"
         )
 
-    unique_chunk_ratio = len(chunk_usage) / allowed_chunk_id_count
-    if strict and chunk_usage and unique_chunk_ratio < 0.1:
-        raise ValueError("draft output uses too narrow a slice of the available evidence")
+    min_distinct_chunks = min(4, max(1, len(nonempty_sections)))
+    if strict and chunk_usage and len(chunk_usage) < min_distinct_chunks:
+        raise ValueError(
+            "draft output uses too few distinct supporting chunks for the filled sections"
+        )
 
     if strict:
         method_text = normalized["method_overview"]["text"]
