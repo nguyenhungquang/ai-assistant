@@ -63,6 +63,8 @@ uv run scripts/hub.py add-source 1706.03762v7 --json
 
 This stages ingest and returns a bounded `draft_packet` plus a prepared JSON path for the coding agent to hand to one drafting subagent.
 
+For arXiv sources, ingest now prioritizes HTML. If neither `arxiv.org/html` nor `ar5iv` is available, the command stops and requires explicit approval before PDF fallback. After approval, rerun with `--allow-pdf-fallback`.
+
 ### Finalize a staged draft
 
 ```bash
@@ -115,6 +117,7 @@ docs/user/  user-facing documentation
 - Raw sources are immutable.
 - Markdown pages are the human-facing artifact.
 - `add-source` now stages ingest and returns `needs-draft` unless you provide `--draft-output-file` or `--draft-output-stdin`.
+- arXiv ingest is HTML-first. PDF fallback is blocked unless you rerun with `--allow-pdf-fallback` after explicit user approval.
 - `ingest-finalize` writes the canonical wiki page directly into its target wiki folder with review status in frontmatter.
 - Verification and synthesis are still improving; current verification is stronger than before but not yet deeply semantic.
 - The repository supports external drafter handoff, but the top-level model orchestration remains the responsibility of the coding CLI agent.

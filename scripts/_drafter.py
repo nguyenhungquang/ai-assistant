@@ -262,16 +262,6 @@ def build_draft_packet(
         and not is_reference_like(chunk)
     ]
 
-    def extend_unique(target: list[DraftChunk], candidates: list[DraftChunk], limit: int) -> None:
-        seen_ids = {item["chunk_id"] for item in target}
-        for candidate in candidates:
-            if candidate["chunk_id"] in seen_ids:
-                continue
-            target.append(candidate)
-            seen_ids.add(candidate["chunk_id"])
-            if len(target) >= limit:
-                break
-
     selected = ranked_chunks
     packet_chunks = [
         {

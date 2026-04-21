@@ -1,7 +1,5 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
-import argparse
 import json
 import re
 import shutil
@@ -39,25 +37,6 @@ from _common import (
     target_dir_for_page_type,
     utc_now,
 )
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Ingest a paper into the research vault from local PDF or arXiv source."
-    )
-    parser.add_argument(
-        "source_input", help="Local PDF path, arXiv ID, arXiv URL, or ar5iv URL"
-    )
-    parser.add_argument("--title", help="Override detected title")
-    parser.add_argument(
-        "--canonical-locator",
-        help="Canonical locator such as DOI, arXiv URL, or source URL",
-    )
-    parser.add_argument("--draft-output-file")
-    parser.add_argument("--json", action="store_true")
-    return parser.parse_args()
-
-
 def exit_blocked(message: str) -> None:
     print(message, file=sys.stderr)
     raise SystemExit(2)
@@ -869,7 +848,6 @@ def build_page_markdown(
     published_at: str | None,
     source_kind: str,
     source_url: str | None,
-    parsed_snapshot_rel: str,
     chunk_count: int,
     quality_label: str,
     quality_notes: list[str],
@@ -1101,6 +1079,7 @@ def prepare_ingest(
     source_input: str,
     title_override: str | None = None,
     canonical_locator_override: str | None = None,
+    allow_pdf_fallback: bool = False,
 ) -> dict:
     arxiv_ref = parse_arxiv_reference(source_input)
     source_path = Path(source_input).expanduser().resolve()
@@ -1144,13 +1123,22 @@ def prepare_ingest(
                 html_snapshot_text = fallback_html
                 html_data = extract_arxiv_html(fallback_html)
             else:
+                conn.close()
+                if not allow_pdf_fallback:
+                    exit_blocked(
+                        "HTML is unavailable for this arXiv source. "
+                        "Ask the user for approval before using PDF fallback, then rerun with --allow-pdf-fallback."
+                    )
                 source_kind = "pdf"
                 source_url = arxiv_ref["pdf_url"]
                 html_data = None
 
         pdf_bytes = fetch_url_bytes(arxiv_ref["pdf_url"])
         if not pdf_bytes:
-            conn.close()
+            try:
+                conn.close()
+            except Exception:
+                pass
             raise SystemExit("Failed to download canonical arXiv PDF.")
         canonical_pdf_page_count = count_pdf_pages_from_bytes(pdf_bytes)
 
@@ -1418,7 +1406,6 @@ def finalize_ingest(prepared: dict, draft_output: DraftOutput | None = None) -> 
         published_at=prepared["published_at"],
         source_kind=prepared["source_kind"],
         source_url=prepared["source_url"],
-        parsed_snapshot_rel=prepared["parsed_snapshot_path"],
         chunk_count=chunk_count,
         quality_label=quality_label,
         quality_notes=quality_notes,
@@ -1529,22 +1516,6 @@ def persist_draft_claims(conn, *, page_id: str, draft: DraftOutput) -> list[str]
     for item in draft.get("limitations", []):
         insert_section("limitation", item["text"], item["chunk_ids"])
     return created
-
-
-def main() -> None:
-    args = parse_args()
-    prepared = prepare_ingest(
-        source_input=args.source_input,
-        title_override=args.title,
-        canonical_locator_override=args.canonical_locator,
-    )
-    draft_output = None
-    if args.draft_output_file:
-        draft_output = json.loads(Path(args.draft_output_file).read_text())
-    payload = finalize_ingest(prepared, draft_output=draft_output)
-    print(json.dumps(payload, indent=2))
-
-
 def validate_prepared_ingest(prepared: dict[str, Any]) -> dict[str, Any]:
     required_fields = {
         "source_id",
@@ -1686,7 +1657,3 @@ def validate_prepared_ingest(prepared: dict[str, Any]) -> dict[str, Any]:
                     f"prepared packet chunk content does not match persisted state for {chunk['chunk_id']}"
                 )
     return prepared
-
-
-if __name__ == "__main__":
-    main()

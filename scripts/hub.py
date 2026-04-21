@@ -5,7 +5,6 @@ import argparse
 import json
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -20,12 +19,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="paper-hub orchestrator CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    ingest = subparsers.add_parser("ingest", help="Ingest a paper source")
-    ingest.add_argument("source")
-    ingest.add_argument("--title")
-    ingest.add_argument("--canonical-locator")
-    ingest.add_argument("--json", action="store_true")
-
     add_source = subparsers.add_parser(
         "add-source",
         help="User-facing workflow wrapper for adding a source to the wiki",
@@ -33,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_source.add_argument("source")
     add_source.add_argument("--title")
     add_source.add_argument("--canonical-locator")
+    add_source.add_argument("--allow-pdf-fallback", action="store_true")
     add_source.add_argument("--draft-output-file")
     add_source.add_argument("--draft-output-stdin", action="store_true")
     add_source.add_argument("--verify", action="store_true")
@@ -45,6 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_prepare.add_argument("source")
     ingest_prepare.add_argument("--title")
     ingest_prepare.add_argument("--canonical-locator")
+    ingest_prepare.add_argument("--allow-pdf-fallback", action="store_true")
     ingest_prepare.add_argument("--json", action="store_true")
 
     draft_handoff = subparsers.add_parser(
@@ -185,42 +180,6 @@ def normalize_paths(obj: Any) -> Any:
     return obj
 
 
-def handle_ingest(args: argparse.Namespace) -> tuple[int, dict]:
-    script_args = [args.source]
-    if args.title:
-        script_args.extend(["--title", args.title])
-    if args.canonical_locator:
-        script_args.extend(["--canonical-locator", args.canonical_locator])
-    proc = run_script("ingest_source.py", script_args)
-    if proc.returncode != 0:
-        return map_failure("ingest", proc.stderr, proc.returncode)
-
-    parsed = normalize_paths(json.loads(proc.stdout))
-    page_path = parsed.get("page_path")
-    source_id = parsed.get("source_id")
-    source_kind = parsed.get("source_kind")
-    chunk_count = parsed.get("chunk_count")
-    response = envelope(
-        command="ingest",
-        ok=True,
-        status=parsed.get("status", "needs-review"),
-        issues=[],
-        warnings=[],
-        result={
-            "source_id": source_id,
-            "version_id": parsed.get("version_id"),
-            "page_id": parsed.get("page_id"),
-            "page_path": page_path,
-            "source_kind": source_kind,
-            "chunk_count": chunk_count,
-        },
-        writes={
-            "page": page_path,
-        },
-    )
-    return 2, response
-
-
 def load_draft_input(
     args: argparse.Namespace,
 ) -> tuple[str | None, list[str], list[str]]:
@@ -252,6 +211,8 @@ def handle_ingest_prepare(args: argparse.Namespace) -> tuple[int, dict]:
         script_args.extend(["--title", args.title])
     if args.canonical_locator:
         script_args.extend(["--canonical-locator", args.canonical_locator])
+    if args.allow_pdf_fallback:
+        script_args.append("--allow-pdf-fallback")
     proc = run_script("ingest_prepare.py", script_args)
     if proc.returncode != 0:
         return map_failure("ingest-prepare", proc.stderr, proc.returncode)
@@ -380,6 +341,7 @@ def handle_add_source(args: argparse.Namespace) -> tuple[int, dict]:
         source=args.source,
         title=args.title,
         canonical_locator=args.canonical_locator,
+        allow_pdf_fallback=args.allow_pdf_fallback,
     )
     prepare_code, prepare_response = handle_ingest_prepare(prepare_args)
     if prepare_code != 0:
@@ -697,7 +659,6 @@ def main() -> None:
     args = parser.parse_args()
 
     handler_map = {
-        "ingest": handle_ingest,
         "add-source": handle_add_source,
         "ask": handle_ask,
         "ingest-prepare": handle_ingest_prepare,

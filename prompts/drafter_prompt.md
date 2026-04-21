@@ -64,6 +64,7 @@ Return JSON only, with this shape:
 - `big_picture` must be non-empty.
 - Include at least 1 `main_contributions` item and at least 1 `main_results` item when the packet supports them.
 - `method_overview` must be non-empty and must explain how the paper works.
+- `method_overview` must present the method top down: start with the overall problem framing and system design, then explain the main components and how they interact, and only then include lower-level mechanisms or equations when they are central.
 - Use only `chunk_ids` present in the packet.
 - Every substantive statement must have supporting `chunk_ids`.
 - Keep wording conservative.
@@ -75,6 +76,8 @@ Return JSON only, with this shape:
 - Prefer `candidate_groups.method_overview_candidates` for `method_overview`.
 - Use `candidate_groups.method_equation_candidates` only when a key equation is central to explaining the method.
 - Use `candidate_groups.technical_method_candidates` in `detailed_findings`, not as the main `method_overview`, unless the packet lacks broader method evidence.
+- In `main_results` and `detailed_findings`, list every important experimental result, ablation, comparison, or qualitative insight that the paper makes and that the packet supports; do not stop after one or two examples if more important claims are present.
+- For each `main_results` and `detailed_findings` item, make the claim specific and use `chunk_ids` that show where in the paper that claim appears.
 - Prefer 1 big picture section, up to 5 contributions, up to 5 results, 1 method overview, up to 6 detailed findings, up to 4 limitations, and up to 4 open questions.
 - Do not output markdown.
 - Do not output explanations.

@@ -10,6 +10,7 @@ Default behavior:
 
 - stage source
 - return a bounded draft handoff packet for the coding agent
+- for arXiv sources, prefer HTML and stop for approval before PDF fallback
 
 Coordinator behavior:
 
@@ -18,6 +19,12 @@ Coordinator behavior:
 3. call `ingest-finalize <prepared-json> --draft-output-file <draft.json>`
 4. optionally run `verify`
 5. optionally run `publish`
+
+If HTML is unavailable for an arXiv source:
+
+1. stop and ask the user whether PDF fallback is allowed
+2. rerun `add-source <source> --allow-pdf-fallback` or `ingest-prepare <source> --allow-pdf-fallback`
+3. continue with the normal draft handoff and finalize flow
 
 If you want safe automatic publishing, use:
 
