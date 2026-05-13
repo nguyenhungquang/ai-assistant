@@ -11,7 +11,7 @@ from ingest_source import finalize_ingest
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Finalize ingest from a prepared packet and optional draft output."
+        description="Finalize ingest from a prepared packet and required draft output."
     )
     parser.add_argument("prepared_json")
     parser.add_argument("--draft-output-file")

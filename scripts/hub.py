@@ -26,7 +26,6 @@ def build_parser() -> argparse.ArgumentParser:
     add_source.add_argument("source")
     add_source.add_argument("--title")
     add_source.add_argument("--canonical-locator")
-    add_source.add_argument("--allow-pdf-fallback", action="store_true")
     add_source.add_argument("--draft-output-file")
     add_source.add_argument("--draft-output-stdin", action="store_true")
     add_source.add_argument("--verify", action="store_true")
@@ -39,7 +38,6 @@ def build_parser() -> argparse.ArgumentParser:
     ingest_prepare.add_argument("source")
     ingest_prepare.add_argument("--title")
     ingest_prepare.add_argument("--canonical-locator")
-    ingest_prepare.add_argument("--allow-pdf-fallback", action="store_true")
     ingest_prepare.add_argument("--json", action="store_true")
 
     draft_handoff = subparsers.add_parser(
@@ -56,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ingest_finalize = subparsers.add_parser(
         "ingest-finalize",
-        help="Finalize ingest from prepared packet and optional draft output",
+        help="Finalize ingest from prepared packet and required external draft output",
     )
     ingest_finalize.add_argument("prepared_json")
     ingest_finalize.add_argument("--draft-output-file")
@@ -160,15 +158,25 @@ def normalize_path(value: str) -> str:
 
 
 def normalize_paths(obj: Any) -> Any:
+    filesystem_path_keys = {
+        "config_path",
+        "page_path",
+        "prepared_json",
+        "prepared_json_path",
+        "prompt_path",
+        "raw_path",
+        "parsed_snapshot_path",
+        "extracted_path",
+        "target_page_path",
+        "page",
+        "published_page",
+        "from_path",
+        "to_path",
+    }
     if isinstance(obj, dict):
         normalized: dict[str, Any] = {}
         for key, value in obj.items():
-            if key.endswith("path") or key in {
-                "page",
-                "published_page",
-                "from_path",
-                "to_path",
-            }:
+            if key in filesystem_path_keys:
                 normalized[key] = (
                     normalize_path(value) if isinstance(value, str) else value
                 )
@@ -211,8 +219,6 @@ def handle_ingest_prepare(args: argparse.Namespace) -> tuple[int, dict]:
         script_args.extend(["--title", args.title])
     if args.canonical_locator:
         script_args.extend(["--canonical-locator", args.canonical_locator])
-    if args.allow_pdf_fallback:
-        script_args.append("--allow-pdf-fallback")
     proc = run_script("ingest_prepare.py", script_args)
     if proc.returncode != 0:
         return map_failure("ingest-prepare", proc.stderr, proc.returncode)
@@ -262,15 +268,31 @@ def handle_ingest_finalize(args: argparse.Namespace) -> tuple[int, dict]:
 
 
 def expected_draft_output_schema() -> dict[str, Any]:
-    section = {"text": "string", "chunk_ids": ["src_..._chunk_00001"]}
+    section = {
+        "text": "string",
+        "chunk_ids": ["src_..._chunk_00001"],
+        "figure_ids": ["S1.F1"],
+        "equation_ids": ["S3.Ex1.m1"],
+    }
+    entry = {
+        "title": "string",
+        "text": "string",
+        "chunk_ids": ["src_..._chunk_00001"],
+        "figure_ids": ["Figure 1"],
+        "equation_ids": ["Equation 1"],
+    }
     return {
         "big_picture": section,
-        "main_contributions": [section],
-        "main_results": [section],
+        "problem_setting": section,
+        "core_claims": [entry],
         "method_overview": section,
-        "detailed_findings": [section],
-        "limitations": [section],
-        "open_questions": [section],
+        "method_details": [entry],
+        "data_or_inputs": [entry],
+        "experimental_setup": [entry],
+        "results": [entry],
+        "analysis": [entry],
+        "limitations": [entry],
+        "open_questions": [entry],
     }
 
 
@@ -281,16 +303,31 @@ def load_prepared_json(prepared_json: str) -> dict[str, Any]:
     return normalize_paths(json.loads(prepared_path.read_text()))
 
 
+def duplicate_source_id(response: dict) -> str | None:
+    for issue in response.get("issues", []):
+        if not isinstance(issue, str):
+            continue
+        prefix = "Duplicate source detected: "
+        if issue.startswith(prefix):
+            return issue.removeprefix(prefix).strip()
+    return None
+
+
 def handle_draft_handoff(args: argparse.Namespace) -> tuple[int, dict]:
     prepared = load_prepared_json(args.prepared_json)
     prompt_path = ROOT / "prompts" / "drafter_prompt.md"
     prompt_text = prompt_path.read_text()
     prepared_rel = normalize_path(str(args.prepared_json))
+    fallback_finalize_command = (
+        f"uv run scripts/hub.py add-source {prepared['source_url']} --draft-output-file <draft.json> --json"
+        if prepared.get("source_url")
+        else f"uv run scripts/hub.py ingest-finalize {prepared_rel} --draft-output-file <draft.json> --json"
+    )
     finalize_command = (
         prepared.get("coordination", {}) or {}
     ).get(
         "finalize_command",
-        f"uv run scripts/hub.py ingest-finalize {prepared_rel} --draft-output-file <draft.json> --json",
+        fallback_finalize_command,
     )
     verify_command = (
         prepared.get("coordination", {}) or {}
@@ -317,6 +354,18 @@ def handle_draft_handoff(args: argparse.Namespace) -> tuple[int, dict]:
             "allowed_chunk_ids": [
                 chunk["chunk_id"] for chunk in prepared.get("draft_packet", {}).get("chunks", [])
             ],
+            "allowed_figure_ids": [
+                value
+                for figure in prepared.get("draft_packet", {}).get("figures", [])
+                for value in [figure.get("figure_id"), figure.get("label")]
+                if value
+            ],
+            "allowed_equation_ids": [
+                value
+                for equation in prepared.get("draft_packet", {}).get("equations", [])
+                for value in [equation.get("math_id"), equation.get("label")]
+                if value
+            ],
         },
         "next_steps": {
             "finalize_command": finalize_command,
@@ -341,28 +390,46 @@ def handle_add_source(args: argparse.Namespace) -> tuple[int, dict]:
         source=args.source,
         title=args.title,
         canonical_locator=args.canonical_locator,
-        allow_pdf_fallback=args.allow_pdf_fallback,
     )
+    draft_input_text, finalize_extra_args, warnings = load_draft_input(args)
     prepare_code, prepare_response = handle_ingest_prepare(prepare_args)
     if prepare_code != 0:
+        duplicate_id = duplicate_source_id(prepare_response)
+        if duplicate_id and finalize_extra_args:
+            prepared_path = ROOT / "system" / "cache" / f"prepared-{duplicate_id}.json"
+            if not prepared_path.exists():
+                prepare_response["command"] = "add-source"
+                prepare_response["issues"].append(
+                    f"Prepared packet not found for duplicate source: {normalize_path(str(prepared_path))}"
+                )
+                return prepare_code, prepare_response
+            prepared_payload = load_prepared_json(str(prepared_path))
+        else:
+            prepare_response["command"] = "add-source"
+            return prepare_code, prepare_response
+    else:
+        prepared_payload = prepare_response["result"]
+        cache_dir = ROOT / "system" / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        prepared_path = cache_dir / f"prepared-{prepared_payload['source_id']}.json"
+        prepared_path.write_text(json.dumps(prepared_payload, indent=2))
+
+    if prepare_code != 0 and not finalize_extra_args:
         prepare_response["command"] = "add-source"
         return prepare_code, prepare_response
 
-    prepared_payload = prepare_response["result"]
-    cache_dir = ROOT / "system" / "cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    prepared_path = cache_dir / f"prepared-{prepared_payload['source_id']}.json"
-    prepared_path.write_text(json.dumps(prepared_payload, indent=2))
-
-    draft_input_text, finalize_extra_args, warnings = load_draft_input(args)
     if not finalize_extra_args:
+        coordination = dict(prepared_payload.get("coordination") or {})
+        coordination["finalize_command"] = (
+            f"uv run scripts/hub.py add-source {args.source} --draft-output-file <draft.json> --json"
+        )
         response = envelope(
             command="add-source",
             ok=True,
             status="needs-draft",
             issues=[],
             warnings=[
-                "Prepared ingest is staged. Top-level coordinator should hand result.draft_packet to one drafting subagent, require it to read the full paper text in the packet first, then call ingest-finalize with the structured draft output."
+                "Prepared ingest is staged. Top-level coordinator should hand result.draft_packet to one drafting subagent, require it to read the full paper text in the packet first, then call add-source again with the structured draft output. add-source will finalize and attempt publish automatically."
             ],
             result={
                 "source_id": prepared_payload.get("source_id"),
@@ -374,7 +441,7 @@ def handle_add_source(args: argparse.Namespace) -> tuple[int, dict]:
                 "agent_policy": agent_edit_policy(),
                 "chunk_count": prepared_payload.get("chunk_count"),
                 "prepared_json": normalize_path(str(prepared_path)),
-                "coordination": prepared_payload.get("coordination"),
+                "coordination": coordination,
                 "draft_packet": prepared_payload.get("draft_packet"),
             },
             writes={
@@ -409,46 +476,32 @@ def handle_add_source(args: argparse.Namespace) -> tuple[int, dict]:
     }
     writes = {"page": finalized.get("page_path")}
     status = finalized.get("status", "needs-review")
+    exit_code = 2
 
-    should_verify = args.verify or args.publish_if_pass
-    if should_verify and finalized.get("page_path"):
-        verify_args = argparse.Namespace(page_path=finalized["page_path"])
-        verify_code, verify_response = handle_verify(verify_args)
-        result["verify_verdict"] = verify_response["status"]
-        if verify_response["issues"]:
-            warnings.extend(verify_response["issues"])
-        if verify_code == 1:
+    if finalized.get("page_path"):
+        publish_args = argparse.Namespace(page_path=finalized["page_path"])
+        publish_code, publish_response = handle_publish(publish_args)
+        if publish_code == 1:
             return 1, envelope(
                 command="add-source",
                 ok=False,
                 status="error",
-                issues=verify_response["issues"],
+                issues=publish_response["issues"],
                 warnings=warnings,
                 result=result,
                 writes=writes,
             )
-
-        if args.publish_if_pass and verify_response["status"] == "pass":
-            publish_args = argparse.Namespace(page_path=finalized["page_path"])
-            publish_code, publish_response = handle_publish(publish_args)
-            if publish_code == 1:
-                return 1, envelope(
-                    command="add-source",
-                    ok=False,
-                    status="error",
-                    issues=publish_response["issues"],
-                    warnings=warnings,
-                    result=result,
-                    writes=writes,
-                )
-            if publish_code == 0:
-                published_path = publish_response["result"].get("to_path")
-                result["page_path"] = published_path
-                writes["page"] = published_path
-                result["publish_verdict"] = "published"
-                status = "published"
-            else:
-                warnings.extend(publish_response.get("issues", []))
+        if publish_code == 0:
+            published_path = publish_response["result"].get("to_path")
+            result["page_path"] = published_path
+            writes["page"] = published_path
+            result["publish_verdict"] = "published"
+            result["verification"] = publish_response["result"].get("verification")
+            status = "published"
+            exit_code = 0
+        else:
+            result["publish_verdict"] = "blocked"
+            warnings.extend(publish_response.get("issues", []))
 
     response = envelope(
         command="add-source",
@@ -459,7 +512,7 @@ def handle_add_source(args: argparse.Namespace) -> tuple[int, dict]:
         result=result,
         writes=writes,
     )
-    return 2, response
+    return exit_code, response
 
 
 def handle_retrieve(args: argparse.Namespace) -> tuple[int, dict]:

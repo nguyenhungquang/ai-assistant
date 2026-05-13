@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Literal, TypedDict
+from typing import NotRequired, TypedDict
 
 
 class DraftChunk(TypedDict):
@@ -30,6 +30,8 @@ class DraftPacket(TypedDict):
     candidate_groups: dict
     section_blocks: dict
     chunks: list[DraftChunk]
+    figures: NotRequired[list[dict]]
+    equations: NotRequired[list[dict]]
 
 
 class DraftCandidate(TypedDict):
@@ -46,16 +48,30 @@ class DraftCandidate(TypedDict):
 class DraftSection(TypedDict):
     text: str
     chunk_ids: list[str]
+    figure_ids: NotRequired[list[str]]
+    equation_ids: NotRequired[list[str]]
+
+
+class DraftEntry(TypedDict):
+    title: str
+    text: str
+    chunk_ids: list[str]
+    figure_ids: NotRequired[list[str]]
+    equation_ids: NotRequired[list[str]]
 
 
 class DraftOutput(TypedDict):
     big_picture: DraftSection
-    main_contributions: list[DraftSection]
-    main_results: list[DraftSection]
+    problem_setting: DraftSection
+    core_claims: list[DraftEntry]
     method_overview: DraftSection
-    detailed_findings: list[DraftSection]
-    limitations: list[DraftSection]
-    open_questions: list[DraftSection]
+    method_details: list[DraftEntry]
+    data_or_inputs: list[DraftEntry]
+    experimental_setup: list[DraftEntry]
+    results: list[DraftEntry]
+    analysis: list[DraftEntry]
+    limitations: list[DraftEntry]
+    open_questions: list[DraftEntry]
 
 
 SECTION_PRIORITY_KEYWORDS = [
@@ -468,18 +484,21 @@ def build_draft_packet(
         "drafting_rules": [
             "Write for a human reader using a top-down structure.",
             "Read the full paper text before drafting; do not rely only on the candidate groups.",
-            "Start with high-level ideas and main contributions before details.",
+            "Start with high-level ideas before low-level details.",
             "Do not invent facts or use evidence outside this packet.",
             "Use only packet chunk IDs for evidence linkage.",
             "Prefer plain-English synthesis over copied source text when possible.",
             "Method Overview must explain how the paper works using method evidence, not result evidence.",
             "Use equations to clarify the method only when they are central; explain them in plain language instead of turning Method Overview into a derivation dump.",
             "If the source contains equations or formal expressions, render them using Obsidian-compatible math syntax with $...$ or $$...$$.",
+            "Use figure_ids and equation_ids only for important media; place selected media in the section that explains it.",
+            "Do not attach every extracted figure or equation to the draft.",
         ],
         "draft_template": (
-            "Write a top-down research note with: big_picture, main_contributions, "
-            "main_results, method_overview, detailed_findings, limitations, open_questions. "
-            "Use only packet chunk IDs as evidence."
+            "Write a generalized technical reference page with: big_picture, "
+            "problem_setting, core_claims, method_overview, method_details, "
+            "data_or_inputs, experimental_setup, results, analysis, limitations, "
+            "open_questions. Use only packet chunk IDs as evidence."
         ),
         "candidate_groups": {
             "big_picture_candidates": bundle_candidates(big_picture_candidates),
@@ -1059,136 +1078,14 @@ def make_sections(
     ]
 
 
-def draft_from_packet(packet: DraftPacket) -> DraftOutput:
-    chunks = [
-        chunk
-        for chunk in packet["chunks"]
-        if not is_heading_only(chunk["chunk_text"]) and not is_reference_like(chunk)
-    ]
-    if not chunks:
-        chunks = packet["chunks"]
-
-    big_picture_chunk = next(
-        iter(
-            pick_chunks(
-                chunks,
-                predicate=lambda chunk: (
-                    has_section_ancestry(chunk, {"abstract", "introduction"})
-                    or text_matches(chunk, CONTRIBUTION_CUES)
-                ),
-                limit=1,
-                role="big_picture",
-            )
-        ),
-        chunks[0] if chunks else None,
-    )
-    method_overview_candidates = pick_chunks(
-        chunks,
-        predicate=lambda chunk: is_method_overview_like(chunk),
-        limit=2,
-        role="method_overview",
-    )
-    method_candidates = pick_chunks(
-        chunks,
-        predicate=lambda chunk: has_section_ancestry(chunk, {"method"})
-        and text_matches(chunk, METHOD_CUES),
-        limit=2,
-        role="method",
-    )
-    method_chunk = next(
-        iter(method_overview_candidates or method_candidates),
-        chunks[1] if len(chunks) > 1 else big_picture_chunk,
-    )
-    contribution_chunks = pick_chunks(
-        chunks,
-        predicate=lambda chunk: has_section_ancestry(
-            chunk, {"abstract", "introduction", "conclusion"}
-        )
-        or text_matches(chunk, CONTRIBUTION_CUES),
-        limit=4,
-        role="contribution",
-    )
-    result_chunks = pick_chunks(
-        chunks,
-        predicate=lambda chunk: has_section_ancestry(
-            chunk, {"results", "discussion", "conclusion"}
-        )
-        and is_result_like(chunk)
-        and supports_result_role(chunk),
-        limit=4,
-        role="result",
-    )
-    limitation_chunks = pick_chunks(
-        chunks,
-        predicate=lambda chunk: has_section_ancestry(
-            chunk, {"limitations", "discussion", "conclusion"}
-        )
-        or text_matches(chunk, LIMITATION_CUES),
-        limit=3,
-        role="limitation",
-    )
-    detail_chunks = pick_chunks(
-        chunks,
-        predicate=lambda chunk: (
-            (
-                has_section_ancestry(chunk, {"results", "discussion"})
-                and is_result_like(chunk)
-                and supports_result_role(chunk)
-            )
-            or (has_section_ancestry(chunk, {"method"}) and text_matches(chunk, DETAIL_CUES))
-        ),
-        limit=4,
-        role="detail",
-    )
-
-    open_questions = []
-    if limitation_chunks:
-        open_questions = [
-            {
-                "text": (
-                    f"Open question from {chunk.get('section_path') or 'the paper'}: "
-                    f"{summarize_paragraph(chunk['chunk_text'], max_sentences=1)}"
-                ),
-                "chunk_ids": [chunk["chunk_id"]],
-            }
-            for chunk in limitation_chunks[:2]
-            if summarize_paragraph(chunk["chunk_text"], max_sentences=1)
-        ]
-
-    return {
-        "big_picture": make_section(
-            big_picture_chunk, role="big_picture", max_sentences=3
-        ),
-        "main_contributions": make_sections(
-            contribution_chunks[:3], role="contribution", max_sentences=1
-        ),
-        "main_results": make_sections(
-            result_chunks[:3], role="result", max_sentences=1
-        ),
-        "method_overview": make_section(
-            method_chunk, role="method_overview", max_sentences=2
-        ),
-        "detailed_findings": make_sections(
-            detail_chunks[:4], role="detail", max_sentences=1
-        ),
-        "limitations": make_sections(
-            limitation_chunks[:3], role="limitation", max_sentences=1
-        ),
-        "open_questions": open_questions,
-    }
-
-
 def run_drafter(
     packet: DraftPacket,
     *,
     draft_output: DraftOutput | None = None,
-    mode: Literal["heuristic", "external"] = "heuristic",
 ) -> DraftOutput:
     if draft_output is not None:
-        return validate_draft_output(packet, draft_output, strict=(mode == "external"))
-    if mode == "heuristic":
-        return draft_from_packet(packet)
-    raise ValueError("external drafter mode requires draft_output")
+        return validate_draft_output(packet, draft_output, strict=True)
+    raise ValueError("draft output is required; heuristic drafting has been removed")
 
 
 def validate_draft_output(
@@ -1196,6 +1093,38 @@ def validate_draft_output(
 ) -> DraftOutput:
     allowed_chunk_ids = {chunk["chunk_id"] for chunk in packet["chunks"]}
     chunk_lookup = {chunk["chunk_id"]: chunk for chunk in packet["chunks"]}
+    allowed_figure_ids: set[str] = set()
+    for figure in packet.get("figures", []):
+        for key in ("figure_id", "label"):
+            value = figure.get(key)
+            if isinstance(value, str) and value.strip():
+                allowed_figure_ids.add(value.strip())
+    allowed_equation_ids: set[str] = set()
+    for equation in packet.get("equations", []):
+        for key in ("math_id", "label"):
+            value = equation.get(key)
+            if isinstance(value, str) and value.strip():
+                allowed_equation_ids.add(value.strip())
+
+    def normalize_media_ids(
+        section: dict,
+        *,
+        field_name: str,
+        allowed_ids: set[str],
+        media_name: str,
+    ) -> list[str]:
+        values = section.get(field_name, [])
+        if values is None:
+            return []
+        if not isinstance(values, list) or any(
+            not isinstance(item, str) for item in values
+        ):
+            raise ValueError(f"draft section {field_name} must be a list of strings")
+        normalized_values = [item.strip() for item in values if item.strip()]
+        invalid_ids = [item for item in normalized_values if item not in allowed_ids]
+        if invalid_ids:
+            raise ValueError(f"unknown {media_name} ids in draft output: {invalid_ids}")
+        return normalized_values
 
     def normalize_section(section: object, *, allow_empty: bool = False) -> DraftSection:
         if not isinstance(section, dict):
@@ -1211,15 +1140,45 @@ def validate_draft_output(
         invalid_ids = [item for item in chunk_ids if item not in allowed_chunk_ids]
         if invalid_ids:
             raise ValueError(f"unknown chunk ids in draft output: {invalid_ids}")
-        return {"text": text.strip(), "chunk_ids": chunk_ids}
+        return {
+            "text": text.strip(),
+            "chunk_ids": chunk_ids,
+            "figure_ids": normalize_media_ids(
+                section,
+                field_name="figure_ids",
+                allowed_ids=allowed_figure_ids,
+                media_name="figure",
+            ),
+            "equation_ids": normalize_media_ids(
+                section,
+                field_name="equation_ids",
+                allowed_ids=allowed_equation_ids,
+                media_name="equation",
+            ),
+        }
 
-    def normalize_section_list(items: object, *, limit: int) -> list[DraftSection]:
+    def normalize_entry(entry: object) -> DraftEntry:
+        if not isinstance(entry, dict):
+            raise ValueError("draft entry must be an object")
+        title = entry.get("title", "")
+        if not isinstance(title, str):
+            raise ValueError("draft entry title must be a string")
+        normalized_section = normalize_section(entry)
+        return {
+            "title": title.strip(),
+            "text": normalized_section["text"],
+            "chunk_ids": normalized_section["chunk_ids"],
+            "figure_ids": normalized_section["figure_ids"],
+            "equation_ids": normalized_section["equation_ids"],
+        }
+
+    def normalize_section_list(items: object, *, limit: int) -> list[DraftEntry]:
         if not isinstance(items, list):
             raise ValueError("draft section list must be a list")
         if strict and any(not isinstance(item, dict) for item in items):
             raise ValueError("all draft list entries must be objects")
         return [
-            normalize_section(item)
+            normalize_entry(item)
             for item in items[:limit]
             if isinstance(item, dict)
         ]
@@ -1231,35 +1190,51 @@ def validate_draft_output(
         "big_picture": normalize_section(
             draft_output.get("big_picture", {}), allow_empty=True
         ),
-        "main_contributions": normalize_section_list(
-            draft_output.get("main_contributions", []), limit=5
+        "problem_setting": normalize_section(
+            draft_output.get("problem_setting", {}), allow_empty=True
         ),
-        "main_results": normalize_section_list(
-            draft_output.get("main_results", []), limit=5
+        "core_claims": normalize_section_list(
+            draft_output.get("core_claims", []), limit=10
         ),
         "method_overview": normalize_section(
             draft_output.get("method_overview", {}), allow_empty=False
         ),
-        "detailed_findings": normalize_section_list(
-            draft_output.get("detailed_findings", []), limit=6
+        "method_details": normalize_section_list(
+            draft_output.get("method_details", []), limit=16
+        ),
+        "data_or_inputs": normalize_section_list(
+            draft_output.get("data_or_inputs", []), limit=12
+        ),
+        "experimental_setup": normalize_section_list(
+            draft_output.get("experimental_setup", []), limit=12
+        ),
+        "results": normalize_section_list(
+            draft_output.get("results", []), limit=16
+        ),
+        "analysis": normalize_section_list(
+            draft_output.get("analysis", []), limit=16
         ),
         "limitations": normalize_section_list(
-            draft_output.get("limitations", []), limit=4
+            draft_output.get("limitations", []), limit=8
         ),
         "open_questions": normalize_section_list(
-            draft_output.get("open_questions", []), limit=4
+            draft_output.get("open_questions", []), limit=8
         ),
     }
 
-    def all_sections() -> list[tuple[str, DraftSection]]:
-        items: list[tuple[str, DraftSection]] = [
+    def all_sections() -> list[tuple[str, DraftSection | DraftEntry]]:
+        items: list[tuple[str, DraftSection | DraftEntry]] = [
             ("big_picture", normalized["big_picture"]),
+            ("problem_setting", normalized["problem_setting"]),
             ("method_overview", normalized["method_overview"]),
         ]
         for key in (
-            "main_contributions",
-            "main_results",
-            "detailed_findings",
+            "core_claims",
+            "method_details",
+            "data_or_inputs",
+            "experimental_setup",
+            "results",
+            "analysis",
             "limitations",
             "open_questions",
         ):
@@ -1280,18 +1255,22 @@ def validate_draft_output(
 
     if strict and not normalized["big_picture"]["text"]:
         raise ValueError("external draft output must include a non-empty big_picture")
-    if strict and not normalized["main_contributions"]:
-        raise ValueError("external draft output must include at least one main_contribution")
-    if strict and not normalized["main_results"]:
-        raise ValueError("external draft output must include at least one main_result")
+    if strict and not normalized["core_claims"]:
+        raise ValueError("external draft output must include at least one core_claim")
     if strict and not normalized["method_overview"]["text"]:
         raise ValueError("external draft output must include a non-empty method_overview")
     if strict and not normalized["method_overview"]["chunk_ids"]:
         raise ValueError("external draft output must link method_overview to at least one supporting chunk_id")
     if strict and word_count(normalized["method_overview"]["text"]) < 12:
         raise ValueError("method_overview is too short to explain how the paper works")
+    if strict and not normalized["method_details"]:
+        raise ValueError("external draft output must include method_details")
+    if strict and not normalized["results"]:
+        raise ValueError("external draft output must include results")
 
     for name, section in nonempty_sections:
+        if "title" in section and strict and not section["title"]:
+            raise ValueError(f"{name} must include a non-empty title")
         text = section["text"]
         if strict and word_count(text) < 6:
             raise ValueError(f"{name} is too short to be useful")
@@ -1345,6 +1324,10 @@ def validate_draft_output(
         ):
             raise ValueError(
                 "method_overview focuses on narrow technical details instead of explaining the overall approach"
+            )
+        if len(normalized["results"]) + len(normalized["analysis"]) < 2:
+            raise ValueError(
+                "draft output must include more result or analysis coverage for a durable reference page"
             )
 
     return normalized

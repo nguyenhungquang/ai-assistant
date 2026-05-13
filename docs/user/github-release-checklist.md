@@ -17,7 +17,7 @@ Use this checklist before pushing or tagging a public release.
 ## Product behavior
 
 - [ ] `add-source` works for a representative paper.
-- [ ] `add-source --publish-if-pass` works for a passable draft.
+- [ ] `add-source --draft-output-file` finalizes and auto-publishes a passable draft.
 - [ ] `ask` works for a known query.
 - [ ] `ask` behaves cleanly for a no-match query.
 - [ ] `verify` and `publish` behave as documented.

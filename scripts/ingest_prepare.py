@@ -14,7 +14,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("source_input")
     parser.add_argument("--title")
     parser.add_argument("--canonical-locator")
-    parser.add_argument("--allow-pdf-fallback", action="store_true")
     return parser.parse_args()
 
 
@@ -24,7 +23,6 @@ def main() -> None:
         source_input=args.source_input,
         title_override=args.title,
         canonical_locator_override=args.canonical_locator,
-        allow_pdf_fallback=args.allow_pdf_fallback,
     )
     print(json.dumps(prepared, indent=2))
 

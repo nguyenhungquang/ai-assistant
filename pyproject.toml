@@ -5,7 +5,6 @@ description = "Local-first research vault agent foundation"
 requires-python = ">=3.12"
 dependencies = [
   "beautifulsoup4>=4.12.3",
-  "pypdf>=5.4.0",
 ]
 
 [tool.uv]

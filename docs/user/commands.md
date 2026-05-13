@@ -4,20 +4,21 @@
 
 ### `add-source`
 
-Add a paper or post to the wiki.
+Add an arXiv paper to the wiki.
 
 ```bash
-uv run scripts/hub.py add-source <source> [--publish-if-pass] [--verify] [--json]
+uv run scripts/hub.py add-source <source> [--draft-output-file <draft.json>] [--draft-output-stdin] [--json]
 ```
 
 Supported source examples:
 
-- local PDF path
 - arXiv ID
 - arXiv URL
-- article/post URL
+- ar5iv URL
 
-For arXiv sources, the command prefers HTML from `arxiv.org/html` or `ar5iv`. If HTML is unavailable, it stops and asks for explicit approval before PDF fallback. After approval, rerun with `--allow-pdf-fallback`.
+The command requires HTML from `arxiv.org/html` or `ar5iv`. If HTML is unavailable, ingest stops.
+
+Without draft output, the command stages ingest and returns a draft packet. With draft output, it finalizes the Markdown page and automatically attempts publish. If publish verification fails, the page remains `needs-review`.
 
 ### `ask`
 

@@ -71,6 +71,7 @@ def main() -> None:
 
     updated = replace_frontmatter_field(text, "status", "published")
     updated = replace_frontmatter_field(updated, "verifier_status", "pass")
+    updated = updated.replace("- Status: `needs-review`", "- Status: `published`")
     rel_new = rel_old
 
     conn.execute(

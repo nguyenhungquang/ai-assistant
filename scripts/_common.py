@@ -9,10 +9,10 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "config.env"
-RAW_PAPERS_DIR = ROOT / "raw" / "papers"
 RAW_HTML_DIR = ROOT / "raw" / "html"
 RAW_POSTS_DIR = ROOT / "raw" / "posts"
 RAW_EXTRACTED_DIR = ROOT / "raw" / "extracted"
+RAW_ASSETS_DIR = ROOT / "raw" / "assets"
 WIKI_PAPERS_DIR = ROOT / "wiki" / "papers"
 WIKI_POSTS_DIR = ROOT / "wiki" / "posts"
 WIKI_TOPICS_DIR = ROOT / "wiki" / "topics"
@@ -37,7 +37,7 @@ SCHEMA_STATEMENTS = [
         canonical_locator TEXT,
         authors_or_creator TEXT,
         published_at TEXT,
-        source_kind TEXT NOT NULL DEFAULT 'pdf',
+        source_kind TEXT NOT NULL DEFAULT 'html',
         source_url TEXT,
         parsed_snapshot_path TEXT,
         raw_path TEXT NOT NULL,
@@ -52,7 +52,7 @@ SCHEMA_STATEMENTS = [
         source_id TEXT NOT NULL,
         version_label TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        source_kind TEXT NOT NULL DEFAULT 'pdf',
+        source_kind TEXT NOT NULL DEFAULT 'html',
         source_url TEXT,
         parsed_snapshot_path TEXT,
         raw_path TEXT NOT NULL,
@@ -208,10 +208,10 @@ def slugify(value: str) -> str:
 def ensure_workspace() -> None:
     ensure_runtime_config()
     for path in [
-        RAW_PAPERS_DIR,
         RAW_HTML_DIR,
         RAW_POSTS_DIR,
         RAW_EXTRACTED_DIR,
+        RAW_ASSETS_DIR,
         WIKI_PAPERS_DIR,
         WIKI_POSTS_DIR,
         WIKI_TOPICS_DIR,
@@ -256,10 +256,10 @@ def db_has_retrieval_schema(conn: sqlite3.Connection) -> bool:
 def init_db(conn: sqlite3.Connection) -> None:
     for statement in SCHEMA_STATEMENTS:
         conn.execute(statement)
-    ensure_column(conn, "sources", "source_kind", "TEXT NOT NULL DEFAULT 'pdf'")
+    ensure_column(conn, "sources", "source_kind", "TEXT NOT NULL DEFAULT 'html'")
     ensure_column(conn, "sources", "source_url", "TEXT")
     ensure_column(conn, "sources", "parsed_snapshot_path", "TEXT")
-    ensure_column(conn, "source_versions", "source_kind", "TEXT NOT NULL DEFAULT 'pdf'")
+    ensure_column(conn, "source_versions", "source_kind", "TEXT NOT NULL DEFAULT 'html'")
     ensure_column(conn, "source_versions", "source_url", "TEXT")
     ensure_column(conn, "source_versions", "parsed_snapshot_path", "TEXT")
     conn.commit()
@@ -673,11 +673,13 @@ def split_text_into_chunks(
                 )
                 page_num = infer_page_num(current, page_breaks)
                 section_label = infer_section_label(current, section_markers or [])
+                section_ref = infer_section_ref(current, section_markers or [])
                 chunks.append(
                     {
                         "chunk_id": f"chunk_{chunk_index:05d}",
                         "section_path": section_label
                         or (f"page:{page_num}" if page_num is not None else None),
+                        "section_ref": section_ref,
                         "chunk_text": normalized[current:slice_end],
                         "char_start": current,
                         "char_end": slice_end,
@@ -730,4 +732,37 @@ def infer_section_label(
         if marker_offset > offset:
             break
         current = marker.get("section_path") or marker.get("canonical_role")
+    return current
+
+
+def section_ref_from_heading(raw_heading: str | None) -> str | None:
+    if not raw_heading:
+        return None
+    heading = re.sub(r"\s+", " ", raw_heading).strip()
+    if not heading:
+        return None
+    appendix_match = re.match(r"^(Appendix\s+[A-Z](?:\.\d+)*)\b", heading, re.IGNORECASE)
+    if appendix_match:
+        return appendix_match.group(1)
+    alpha_numeric_match = re.match(r"^([A-Z]\.\d+(?:\.\d+)*)\b", heading)
+    if alpha_numeric_match:
+        return alpha_numeric_match.group(1)
+    numeric_match = re.match(r"^(?:section\s+)?(\d+(?:\.\d+)*)\b", heading, re.IGNORECASE)
+    if numeric_match:
+        return numeric_match.group(1)
+    lowered = heading.lower()
+    if lowered.startswith("abstract"):
+        return "Abstract"
+    return None
+
+
+def infer_section_ref(offset: int, section_markers: list[dict]) -> str | None:
+    current: str | None = None
+    for marker in section_markers:
+        marker_offset = marker.get("offset", 0)
+        if marker_offset > offset:
+            break
+        marker_ref = section_ref_from_heading(marker.get("raw_heading"))
+        if marker_ref:
+            current = marker_ref
     return current

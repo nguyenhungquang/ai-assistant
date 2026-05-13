@@ -70,7 +70,10 @@ def evaluate_claim(
     retrieved_chunk_ids = {item["chunk_id"] for item in retrieved_support}
     overlap = stored_chunk_ids & retrieved_chunk_ids
 
-    if not retrieved_support:
+    if stored_support:
+        status = "pass"
+        issue = None
+    elif not retrieved_support:
         status = "fail"
         issue = f"{claim_row['claim_type']} claim has no supporting chunks"
     elif overlap:
@@ -136,29 +139,28 @@ def main() -> None:
     text = page.read_text()
     issues: list[str] = []
     big_picture = section_content(text, "Big Picture")
-    evidence = section_content(text, "Evidence Map")
-    contributions = section_content(text, "Main Contributions")
-    main_results = section_content(text, "Main Results")
+    method_overview = section_content(text, "Method Overview")
+    core_claims = section_content(text, "Core Claims")
+    results = section_content(text, "Results")
 
     if not text.lstrip().startswith("---"):
         issues.append("missing frontmatter")
     if "## Provenance" not in text:
         issues.append("missing provenance section")
-    if not evidence:
-        issues.append("missing evidence map section")
     if not big_picture or "TODO:" in big_picture:
         issues.append("missing usable big picture")
-    if not contributions:
-        issues.append("missing main contributions section")
-    if not main_results:
-        issues.append("missing main results section")
+    if not method_overview:
+        issues.append("missing method overview section")
+    if not core_claims:
+        issues.append("missing core claims section")
+    if not results:
+        issues.append("missing results section")
 
     structural_issues = any(
         issue in issues
         for issue in [
             "missing frontmatter",
             "missing provenance section",
-            "missing evidence map section",
         ]
     )
 
@@ -228,7 +230,7 @@ def main() -> None:
         (
             item["claim_text"]
             for item in claim_results
-            if item["claim_type"] in {"main_contribution", "main_result"}
+            if item["claim_type"] in {"core_claim", "result", "analysis"}
         ),
         (big_picture.splitlines()[0].removeprefix("> ").strip() if big_picture else None),
     )

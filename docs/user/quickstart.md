@@ -14,15 +14,15 @@ uv run scripts/hub.py add-source 1706.03762v7 --json
 
 This stages ingest, returns a bounded `draft_packet`, and prepares the final wiki page path.
 This stages ingest and returns a prepared handoff for one drafting subagent.
-For arXiv sources, HTML is preferred. If HTML is unavailable, the command stops and requires explicit approval before PDF fallback; after approval, rerun with `--allow-pdf-fallback`.
+For arXiv sources, HTML is required. If neither `arxiv.org/html` nor `ar5iv` is available, ingest stops.
 
-## 3. Add and publish if safe
+## 3. Finalize and publish
 
 ```bash
-uv run scripts/hub.py add-source 1706.03762v7 --publish-if-pass --json
+uv run scripts/hub.py add-source 1706.03762v7 --draft-output-file <draft.json> --json
 ```
 
-This verifies automatically and marks the final wiki page as published only if verification returns `pass`.
+After a drafter returns structured JSON, rerun `add-source` with that draft file. The command writes the Markdown page and automatically attempts publish. If verification fails, the page remains `needs-review`.
 
 ## 4. Ask a question
 

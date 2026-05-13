@@ -1,24 +1,23 @@
 from __future__ import annotations
 
 import json
+import os
 import re
-import shutil
 import sys
 from html import unescape
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
 from bs4 import BeautifulSoup
-from pypdf import PdfReader
 
-from _drafter import DraftOutput, build_draft_packet, run_drafter, summarize_paragraph
+from _drafter import DraftOutput, build_draft_packet, run_drafter
 from _common import (
+    RAW_ASSETS_DIR,
     RAW_EXTRACTED_DIR,
     RAW_HTML_DIR,
-    RAW_PAPERS_DIR,
     ROOT,
     SYSTEM_CACHE_DIR,
     agent_edit_policy,
@@ -32,6 +31,7 @@ from _common import (
     normalize_claim_text,
     rebuild_fts,
     retrieve_supporting_chunks,
+    section_ref_from_heading,
     slugify,
     split_text_into_chunks,
     target_dir_for_page_type,
@@ -61,15 +61,6 @@ def fetch_url_bytes(url: str, *, timeout: int = 60) -> bytes | None:
         return None
 
 
-def count_pdf_pages_from_bytes(pdf_bytes: bytes) -> int:
-    cache_path = ROOT / "system" / "cache" / "_page_count_probe.pdf"
-    cache_path.write_bytes(pdf_bytes)
-    try:
-        return len(PdfReader(str(cache_path)).pages)
-    finally:
-        cache_path.unlink(missing_ok=True)
-
-
 def parse_arxiv_reference(source_input: str) -> dict | None:
     direct_match = re.fullmatch(
         r"(?P<id>\d{4}\.\d{4,5})(?P<version>v\d+)?", source_input
@@ -97,26 +88,8 @@ def parse_arxiv_reference(source_input: str) -> dict | None:
         "canonical_locator": f"arXiv:{arxiv_id}",
         "abs_url": f"https://arxiv.org/abs/{arxiv_id}",
         "html_url": f"https://arxiv.org/html/{arxiv_id}",
-        "pdf_url": f"https://arxiv.org/pdf/{arxiv_id}.pdf",
         "ar5iv_url": f"https://ar5iv.labs.arxiv.org/html/{arxiv_id}",
     }
-
-
-def extract_pdf(source_path: Path) -> tuple[str, int, list[tuple[int, int]]]:
-    reader = PdfReader(str(source_path))
-    page_texts: list[str] = []
-    page_breaks: list[tuple[int, int]] = []
-    total = 0
-    for idx, page in enumerate(reader.pages, start=1):
-        text = (page.extract_text() or "").strip()
-        if text:
-            cleaned = clean_page_text(text)
-            if not cleaned:
-                continue
-            page_texts.append(cleaned)
-            total += len(cleaned) + 2
-            page_breaks.append((idx, total))
-    return "\n\n".join(page_texts).strip(), len(reader.pages), page_breaks
 
 
 def validate_arxiv_html(html_text: str) -> bool:
@@ -132,7 +105,113 @@ def clean_html_text(text: str) -> str:
     cleaned = unescape(text)
     cleaned = cleaned.replace("\xa0", " ")
     cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"\$\$\s*(.*?)\s*\$\$", r"$$\n\1\n$$", cleaned)
     return cleaned.strip()
+
+
+def tex_from_math_node(node: Any) -> str:
+    annotation = node.find("annotation", attrs={"encoding": "application/x-tex"})
+    tex = annotation.get_text("", strip=True) if annotation is not None else ""
+    if not tex:
+        tex = (node.get("alttext") or "").strip()
+    tex = clean_html_text(tex)
+    if not tex:
+        return ""
+    if node.get("display") == "block":
+        return f"$$\n{tex}\n$$"
+    return f"${tex}$"
+
+
+def text_with_math(node: Any) -> str:
+    clone = BeautifulSoup(str(node), "html.parser")
+    for math_node in clone.select("math"):
+        math_node.replace_with(clone.new_string(f" {tex_from_math_node(math_node)} "))
+    return clean_html_text(clone.get_text(" ", strip=True))
+
+
+def figure_label_from_caption(caption: str, fallback_index: int) -> str:
+    match = re.match(r"^\s*((?:Figure|Fig\.|Table)\s+[A-Za-z0-9.]+)\s*[:.]", caption)
+    if match:
+        return clean_html_text(match.group(1).replace("Fig.", "Figure"))
+    return f"Figure {fallback_index}"
+
+
+def extract_figures_from_section(
+    section: Any,
+    *,
+    section_path: str,
+    section_ref: str | None,
+    start_index: int,
+) -> list[dict[str, Any]]:
+    figures: list[dict[str, Any]] = []
+    for figure in section.find_all("figure", class_="ltx_figure", recursive=False):
+        caption_node = figure.find("figcaption", class_="ltx_caption")
+        caption = text_with_math(caption_node) if caption_node is not None else ""
+        images: list[dict[str, Any]] = []
+        for image_index, image in enumerate(figure.find_all("img"), start=1):
+            src = (image.get("src") or "").strip()
+            if not src or src.startswith("data:"):
+                continue
+            images.append(
+                {
+                    "src": src,
+                    "alt": clean_html_text(image.get("alt") or ""),
+                    "width": image.get("width"),
+                    "height": image.get("height"),
+                    "panel_index": image_index,
+                }
+            )
+        if not images:
+            continue
+        label = figure_label_from_caption(caption, start_index + len(figures))
+        figures.append(
+            {
+                "figure_id": figure.get("id"),
+                "label": label,
+                "caption": caption,
+                "section_path": section_path,
+                "section_ref": section_ref,
+                "images": images,
+            }
+        )
+    return figures
+
+
+def equation_label_from_node(node: Any, fallback_index: int) -> str:
+    container = node.find_parent(["table", "tr", "div"])
+    if container is not None:
+        tag = container.find(class_=re.compile(r"\bltx_tag_equation\b"))
+        if tag is not None:
+            label = clean_html_text(tag.get_text(" ", strip=True)).strip("()")
+            if label:
+                return f"Equation {label}"
+    return f"Equation {fallback_index}"
+
+
+def extract_equations_from_block(
+    block: Any,
+    *,
+    section_path: str,
+    section_ref: str | None,
+    start_index: int,
+) -> list[dict[str, Any]]:
+    equations: list[dict[str, Any]] = []
+    for math_node in block.find_all("math", attrs={"display": "block"}):
+        tex = tex_from_math_node(math_node)
+        if not tex:
+            continue
+        equations.append(
+            {
+                "label": equation_label_from_node(
+                    math_node, start_index + len(equations)
+                ),
+                "tex": tex,
+                "section_path": section_path,
+                "section_ref": section_ref,
+                "math_id": math_node.get("id"),
+            }
+        )
+    return equations
 
 
 def extract_arxiv_html(html_text: str) -> dict:
@@ -151,11 +230,13 @@ def extract_arxiv_html(html_text: str) -> dict:
     abstract = ""
     abstract_node = soup.select_one("div.ltx_abstract p")
     if abstract_node is not None:
-        abstract = clean_html_text(abstract_node.get_text(" ", strip=True))
+        abstract = text_with_math(abstract_node)
 
     body_parts: list[str] = []
     section_markers: list[dict[str, Any]] = []
     section_blocks: dict[str, list[dict[str, str]]] = {}
+    figures: list[dict[str, Any]] = []
+    equations: list[dict[str, Any]] = []
     current_offset = 0
 
     def append_block(text: str) -> int | None:
@@ -202,7 +283,7 @@ def extract_arxiv_html(html_text: str) -> dict:
         heading_text = None
         for child in section.children:
             if getattr(child, "name", None) in {"h2", "h3", "h4", "h5", "h6"}:
-                heading_text = clean_html_text(child.get_text(" ", strip=True))
+                heading_text = text_with_math(child)
                 break
 
         role = canonical_section_role(heading_text or "") or root_role or "body"
@@ -224,12 +305,22 @@ def extract_arxiv_html(html_text: str) -> dict:
             if current_parts
             else current_root_role
         )
+        section_ref = section_ref_from_heading(heading_text)
+
+        figures.extend(
+            extract_figures_from_section(
+                section,
+                section_path=section_path,
+                section_ref=section_ref,
+                start_index=len(figures) + 1,
+            )
+        )
 
         section_texts: list[str] = []
         for child in section.children:
             child_name = getattr(child, "name", None)
             if child_name in {"h2", "h3", "h4", "h5", "h6"}:
-                child_heading = clean_html_text(child.get_text(" ", strip=True))
+                child_heading = text_with_math(child)
                 offset = append_block(child_heading)
                 if offset is not None:
                     section_markers.append(
@@ -254,7 +345,15 @@ def extract_arxiv_html(html_text: str) -> dict:
                 cls.startswith("ltx_p") or cls == "ltx_para"
                 for cls in (child.get("class") or [])
             ):
-                para_text = clean_html_text(child.get_text(" ", strip=True))
+                equations.extend(
+                    extract_equations_from_block(
+                        child,
+                        section_path=section_path,
+                        section_ref=section_ref,
+                        start_index=len(equations) + 1,
+                    )
+                )
+                para_text = text_with_math(child)
                 if para_text:
                     append_block(para_text)
                     section_texts.append(para_text)
@@ -285,236 +384,9 @@ def extract_arxiv_html(html_text: str) -> dict:
         "page_breaks": page_breaks,
         "section_markers": section_markers,
         "section_blocks": section_blocks,
+        "figures": figures,
+        "equations": equations,
     }
-
-
-def clean_page_text(text: str) -> str:
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n").replace("\xa0", " ")
-    normalized = re.sub(r"-\n(?=\w)", "", normalized)
-
-    paragraphs: list[str] = []
-    current_lines: list[str] = []
-    for raw_line in normalized.splitlines():
-        line = re.sub(r"\s+", " ", raw_line).strip()
-        if not line:
-            if current_lines:
-                paragraphs.append(" ".join(current_lines).strip())
-                current_lines = []
-            continue
-        current_lines.append(line)
-    if current_lines:
-        paragraphs.append(" ".join(current_lines).strip())
-
-    filtered_paragraphs = [normalize_pdf_paragraph(p) for p in paragraphs if p]
-    filtered_paragraphs = [p for p in filtered_paragraphs if p and not is_noncontent_paragraph(p)]
-    cleaned = "\n\n".join(filtered_paragraphs)
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    cleaned = trim_leading_front_matter(cleaned)
-    cleaned = normalize_embedded_section_boundaries(cleaned)
-    cleaned = merge_broken_paragraphs(cleaned)
-    return cleaned.strip()
-
-
-def normalize_pdf_paragraph(paragraph: str) -> str:
-    cleaned = paragraph.strip()
-    if not cleaned:
-        return ""
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    cleaned = re.sub(r"^\d+\s*$", "", cleaned)
-    cleaned = re.sub(
-        r"^(?:page\s+)?\d+\s+(?:of\s+\d+\s+)?$",
-        "",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    cleaned = re.sub(r"^\d+\s+(?=[A-Z][a-z])", "", cleaned)
-    cleaned = re.sub(r"\bAbstract\b\s*", "Abstract\n\n", cleaned, count=1)
-    cleaned = re.sub(
-        r"^(Abstract|Introduction|Background|Related Work|Methods?|Materials and Methods|Approach|Model Architecture|Architecture|Experiments?|Evaluation|Results?|Discussion|Conclusions?|Limitations?|Future Work|Appendix)\s+(?=[A-Z])",
-        r"\1\n\n",
-        cleaned,
-        count=1,
-        flags=re.IGNORECASE,
-    )
-    cleaned = re.sub(
-        r"\b(\d+(?:\.\d+)*)\s+(Introduction|Background|Related Work|Method|Methods|Approach|Model Architecture|Experiments|Results|Discussion|Conclusion|Conclusions|Limitations|Future Work)\b",
-        r"\n\n\1 \2\n\n",
-        cleaned,
-        count=1,
-    )
-    cleaned = re.sub(
-        r"^((?:section\s+)?\d+(?:\.\d+)*)\s+([A-Z][A-Za-z0-9][A-Za-z0-9 ,/&()\-]{2,80})\s+(?=[A-Z])",
-        r"\1 \2\n\n",
-        cleaned,
-        count=1,
-        flags=re.IGNORECASE,
-    )
-    return cleaned.strip()
-
-
-def is_noncontent_paragraph(paragraph: str) -> bool:
-    lowered = paragraph.lower()
-    if "permission to reproduce" in lowered:
-        return True
-    if "all rights reserved" in lowered or "copyright" in lowered:
-        return True
-    if "work performed while" in lowered:
-        return True
-    if lowered.count("@") >= 2:
-        return True
-    if len(re.findall(r"\bdepartment\b|\buniversity\b|\binstitute\b|\bschool\b|\blaboratory\b", lowered)) >= 4:
-        return True
-    if re.fullmatch(r"(figure|table)\s+\d+[:.].*", lowered):
-        return True
-    if re.fullmatch(r"(references?|acknowledg(e)?ments?)", lowered):
-        return True
-    if re.fullmatch(r"\d+(?:\.\d+)*", lowered):
-        return True
-    if re.fullmatch(
-        r"(abstract|introduction|background|related work|methods?|materials(?: and methods)?|approach|model architecture|architecture|experiments?|evaluation|results?|discussion|conclusions?|limitations?|future work|appendix)",
-        lowered,
-    ):
-        return True
-    if lowered.startswith("references [1]") or "arxiv preprint arxiv:" in lowered:
-        return True
-    if bool(re.match(r"^\[\d+\]\s+[a-z]", lowered)):
-        return True
-    if len(re.findall(r"\bvol\.?\b|\bno\.?\b|\bpp\.?\b|\bdoi\b", lowered)) >= 3:
-        return True
-    return False
-
-
-def trim_leading_front_matter(text: str) -> str:
-    match = re.search(
-        r"\b(Abstract|1\s+Introduction|Introduction)\b",
-        text[:6000],
-        re.IGNORECASE,
-    )
-    if match and match.start() > 0:
-        return text[match.start() :].strip()
-    return text
-
-
-def normalize_embedded_section_boundaries(text: str) -> str:
-    normalized = re.sub(
-        r"\s+(?=(?:\d+(?:\.\d+)*\s+)?(?:Abstract|Introduction|Background|Related Work|Method|Methods|Approach|Model Architecture|Experiments|Results|Discussion|Conclusion|Conclusions|Limitations|Future Work)\b)",
-        "\n\n",
-        text,
-    )
-    normalized = re.sub(
-        r"\s+(?=(?:section\s+)?\d+(?:\.\d+)*\s+[A-Z][A-Za-z0-9][A-Za-z0-9 ,/&()\-]{2,80}\b)",
-        "\n\n",
-        normalized,
-    )
-    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
-    return normalized.strip()
-
-
-def merge_broken_paragraphs(text: str) -> str:
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
-    if not paragraphs:
-        return ""
-
-    merged: list[str] = []
-    for paragraph in paragraphs:
-        if not merged:
-            merged.append(paragraph)
-            continue
-
-        previous = merged[-1]
-        previous_is_heading = is_heading_candidate(previous)
-        current_is_heading = is_heading_candidate(paragraph)
-        previous_ends_sentence = bool(re.search(r'[.!?]["\')\]]?$', previous))
-        current_looks_continuation = bool(
-            re.match(r"^(?:\d+(?:\.\d+)?|[a-z(\[])", paragraph)
-        )
-        current_starts_new_section = current_is_heading
-
-        if previous_is_heading or current_is_heading:
-            merged.append(paragraph)
-            continue
-        if current_starts_new_section:
-            merged.append(paragraph)
-            continue
-        if not previous_ends_sentence or current_looks_continuation:
-            merged[-1] = f"{previous} {paragraph}".strip()
-            continue
-        merged.append(paragraph)
-
-    return "\n\n".join(merged)
-
-
-def normalize_inline_text(value: str | None) -> str | None:
-    if not value:
-        return None
-    cleaned = re.sub(r"\s+", " ", value).strip()
-    return cleaned or None
-
-
-def detect_canonical_locator(text: str, provided: str | None) -> str | None:
-    if provided:
-        return provided
-
-    doi_match = re.search(r"\b(10\.\d{4,9}/[-._;()/:A-Z0-9]+)\b", text, re.IGNORECASE)
-    if doi_match:
-        return doi_match.group(1).rstrip(".,;)")
-
-    arxiv_match = re.search(
-        r"\barXiv:\s*(\d{4}\.\d{4,5}(?:v\d+)?)\b", text, re.IGNORECASE
-    )
-    if arxiv_match:
-        return f"arXiv:{arxiv_match.group(1)}"
-    return None
-
-
-def detect_published_at(text: str, metadata_created: str | None) -> str | None:
-    year_match = re.search(r"\b(19|20)\d{2}\b", text[:4000])
-    if year_match:
-        return year_match.group(0)
-    if metadata_created:
-        year_match = re.search(r"(19|20)\d{2}", metadata_created)
-        if year_match:
-            return year_match.group(0)
-    return None
-
-
-def detect_authors(text: str, metadata_author: str | None) -> str | None:
-    if normalize_inline_text(metadata_author):
-        return normalize_inline_text(metadata_author)
-
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-    for paragraph in paragraphs[1:4]:
-        if len(paragraph) > 300:
-            continue
-        lower = paragraph.lower()
-        if any(
-            token in lower for token in ["abstract", "introduction", "doi", "arxiv"]
-        ):
-            continue
-        if re.search(r"\b(and|,|·)\b", paragraph) or re.search(
-            r"[A-Z][a-z]+\s+[A-Z][a-z]+", paragraph
-        ):
-            return paragraph[:300]
-    return None
-
-
-def detect_title(
-    source_path: Path,
-    extracted_text: str,
-    override: str | None,
-    metadata_title: str | None,
-) -> str:
-    if override:
-        return override.strip()
-    if normalize_inline_text(metadata_title):
-        return normalize_inline_text(metadata_title)[:200]
-    for line in extracted_text.splitlines():
-        clean = line.strip()
-        if len(clean) >= 10:
-            return clean[:200]
-    return (
-        source_path.stem.replace("_", " ").replace("-", " ").strip() or "Untitled PDF"
-    )
 
 
 def extract_author_names(raw_text: str) -> list[str]:
@@ -548,19 +420,73 @@ def extract_author_names(raw_text: str) -> list[str]:
     return authors
 
 
+def file_extension_from_url(url: str) -> str:
+    suffix = Path(urlparse(url).path).suffix.lower()
+    if re.fullmatch(r"\.[a-z0-9]{2,5}", suffix):
+        return suffix
+    return ".png"
+
+
+def download_figure_assets(
+    *,
+    source_id: str,
+    source_url: str,
+    figures: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not figures:
+        return []
+
+    asset_dir = RAW_ASSETS_DIR / source_id
+    asset_dir.mkdir(parents=True, exist_ok=True)
+    resolved_figures: list[dict[str, Any]] = []
+
+    for figure_index, figure in enumerate(figures, start=1):
+        resolved_images: list[dict[str, Any]] = []
+        label_slug = slugify(figure.get("label") or f"figure-{figure_index}")
+        figure_images = figure.get("images", [])
+        for image_index, image in enumerate(figure_images, start=1):
+            src = image.get("src")
+            if not src:
+                continue
+            image_url = urljoin(f"{source_url.rstrip('/')}/", src)
+            image_bytes = fetch_url_bytes(image_url)
+            if not image_bytes:
+                continue
+            suffix = file_extension_from_url(image_url)
+            panel_suffix = f"-{image_index}" if len(figure_images) > 1 else ""
+            target = asset_dir / f"{label_slug}{panel_suffix}{suffix}"
+            target.write_bytes(image_bytes)
+            resolved_image = dict(image)
+            resolved_image.update(
+                {
+                    "source_url": image_url,
+                    "asset_path": str(target.relative_to(ROOT)),
+                }
+            )
+            resolved_images.append(resolved_image)
+
+        if not resolved_images:
+            continue
+        resolved_figure = dict(figure)
+        resolved_figure["images"] = resolved_images
+        resolved_figures.append(resolved_figure)
+
+    return resolved_figures
+
+
 def extraction_quality(
     *, page_count: int, extracted_text: str, chunk_count: int
 ) -> tuple[str, list[str]]:
     notes = [
         f"Extracted characters: {len(extracted_text)}",
         f"Indexed chunks: {chunk_count}",
-        f"Pages in canonical PDF: {page_count}",
+        f"Logical document spans: {page_count}",
     ]
     if not extracted_text.strip():
         return "low", notes + ["No extractable text detected."]
     avg_chars = len(extracted_text) / max(page_count, 1)
     if avg_chars < 150:
-        return "low", notes + ["Very little text extracted per page."]
+        return "low", notes + ["Very little text extracted per logical span."]
     if avg_chars < 600:
         return "medium", notes + ["Extraction is usable but likely incomplete."]
     return "high", notes + ["Extraction looks strong enough for draft retrieval."]
@@ -840,6 +766,7 @@ def build_page_markdown(
     title: str,
     source_id: str,
     version_id: str,
+    page_rel: str,
     raw_rel: str,
     extracted_rel: str,
     page_count: int,
@@ -857,82 +784,133 @@ def build_page_markdown(
     packet_chunk_lookup = {
         chunk["chunk_id"]: chunk for chunk in draft_packet.get("chunks", [])
     }
+    figure_lookup: dict[str, dict] = {}
+    for figure in draft_packet.get("figures", []):
+        for key in ("figure_id", "label"):
+            value = figure.get(key)
+            if isinstance(value, str) and value.strip():
+                figure_lookup.setdefault(value.strip(), figure)
+    equation_lookup: dict[str, dict] = {}
+    for equation in draft_packet.get("equations", []):
+        for key in ("math_id", "label"):
+            value = equation.get(key)
+            if isinstance(value, str) and value.strip():
+                equation_lookup.setdefault(value.strip(), equation)
 
     def clean_text(text: str | None) -> str:
         cleaned = normalize_claim_text((text or "").strip())
         cleaned = re.sub(r"\s+", " ", cleaned)
         return cleaned.strip()
 
-    def format_section(section: dict) -> str:
-        text = clean_text(section.get("text"))
-        if not text:
-            return "Not extracted yet."
-        return text
-
-    def humanize_section_path(section_path: str | None) -> str:
-        if not section_path:
-            return "Source text"
-
-        def humanize_segment(segment: str) -> str:
-            words = segment.split()
-            rendered: list[str] = []
-            for word in words:
-                if word.isdigit():
-                    rendered.append(word)
-                elif len(word) <= 4 and word.isalpha():
-                    rendered.append(word.upper())
-                else:
-                    rendered.append(word.capitalize())
-            return " ".join(rendered)
-
-        return " / ".join(humanize_segment(part) for part in section_path.split(" > "))
-
-    def evidence_lines(chunk_ids: list[str], *, fallback: str) -> str:
-        lines: list[str] = []
+    def section_refs(chunk_ids: list[str]) -> str:
+        refs: list[str] = []
         for chunk_id in chunk_ids:
             chunk = packet_chunk_lookup.get(chunk_id)
             if chunk is None:
                 continue
-            section_label = humanize_section_path(chunk.get("section_path"))
-            page_label = (
-                f", p.{chunk['page_num']}" if chunk.get("page_num") is not None else ""
-            )
-            excerpt = clean_text(
-                summarize_paragraph(chunk.get("chunk_text", ""), max_sentences=1)
-            )
-            if not excerpt:
+            ref = clean_text(chunk.get("section_ref"))
+            if not ref:
                 continue
-            lines.append(f"- {section_label}{page_label}: {excerpt}")
-        return "\n".join(lines) if lines else fallback
+            if ref.lower() == "abstract":
+                label = "Abstract"
+            elif re.match(r"^(?:Appendix\s+)?[A-Z](?:\.\d+)+$", ref):
+                label = f"Appendix {ref}" if not ref.lower().startswith("appendix") else ref
+            else:
+                label = f"§ {ref}"
+            if label not in refs:
+                refs.append(label)
+        return f"Sections: {', '.join(refs)}" if refs else ""
 
-    def render_claim_sections(
+    def relative_asset_path(asset_path: str) -> str:
+        page_parent = (ROOT / page_rel).parent
+        return Path(os.path.relpath(ROOT / asset_path, page_parent)).as_posix()
+
+    def selected_figures(figure_ids: list[str]) -> list[dict]:
+        figures: list[dict] = []
+        seen: set[int] = set()
+        for figure_id in figure_ids:
+            figure = figure_lookup.get(figure_id)
+            if figure is None:
+                continue
+            object_id = id(figure)
+            if object_id in seen:
+                continue
+            seen.add(object_id)
+            figures.append(figure)
+        return figures
+
+    def selected_equations(equation_ids: list[str]) -> list[dict]:
+        equations: list[dict] = []
+        seen: set[int] = set()
+        for equation_id in equation_ids:
+            equation = equation_lookup.get(equation_id)
+            if equation is None:
+                continue
+            object_id = id(equation)
+            if object_id in seen:
+                continue
+            seen.add(object_id)
+            equations.append(equation)
+        return equations
+
+    def render_selected_media(section: dict) -> str:
+        blocks: list[str] = []
+        for equation in selected_equations(section.get("equation_ids", [])):
+            tex = (equation.get("tex") or "").strip()
+            if tex:
+                blocks.append(tex)
+        for figure in selected_figures(section.get("figure_ids", [])):
+            label = clean_text(figure.get("label")) or "Figure"
+            caption = clean_text(figure.get("caption"))
+            image_lines: list[str] = []
+            for image in figure.get("images", []):
+                asset_path = image.get("asset_path")
+                if not asset_path:
+                    continue
+                alt = clean_text(image.get("alt")) or label
+                image_lines.append(f"![{alt}]({relative_asset_path(asset_path)})")
+            if not image_lines:
+                continue
+            figure_lines = [*image_lines]
+            if caption:
+                figure_lines.append(f"*{caption}*")
+            blocks.append("\n\n".join(figure_lines))
+        return "\n\n".join(blocks)
+
+    def format_section(section: dict) -> str:
+        text = clean_text(section.get("text"))
+        if not text:
+            return "Not extracted yet."
+        media_block = render_selected_media(section)
+        if media_block:
+            return f"{text}\n\n{media_block}"
+        return text
+
+    def render_entry_sections(
         items: list[dict],
         *,
-        heading_prefix: str,
         empty_text: str,
-        fallback: str,
     ) -> str:
         if not items:
             return empty_text
         blocks: list[str] = []
         for index, item in enumerate(items, start=1):
+            title_text = clean_text(item.get("title")) or f"Entry {index}"
             text = clean_text(item.get("text"))
             if not text:
                 continue
-            evidence_block = evidence_lines(
-                item.get("chunk_ids", []),
-                fallback=fallback,
-            )
-            blocks.append(
-                f"### {heading_prefix} {index}\n{text}\n\nSupport\n{evidence_block}"
-            )
+            refs = section_refs(item.get("chunk_ids", []))
+            body = format_section(item)
+            block = f"### {title_text}\n{body}"
+            if refs:
+                block = f"{block}\n\n{refs}"
+            blocks.append(block)
         return "\n\n".join(blocks) if blocks else empty_text
 
     def render_bullet_sections(
         items: list[dict],
         *,
         empty_text: str,
-        fallback: str,
     ) -> str:
         if not items:
             return empty_text
@@ -941,51 +919,60 @@ def build_page_markdown(
             text = clean_text(item.get("text"))
             if not text:
                 continue
-            evidence_block = evidence_lines(item.get("chunk_ids", []), fallback=fallback)
-            blocks.append(f"- {text}\n{evidence_block}")
+            refs = section_refs(item.get("chunk_ids", []))
+            suffix = f" ({refs})" if refs else ""
+            media_block = render_selected_media(item)
+            if media_block:
+                blocks.append(f"- {text}{suffix}\n\n{media_block}")
+            else:
+                blocks.append(f"- {text}{suffix}")
         return "\n\n".join(blocks) if blocks else empty_text
 
     locator_line = canonical_locator or "Unknown"
     authors_line = authors_or_creator or "Unknown"
     published_line = published_at or "Unknown"
     big_picture = draft["big_picture"]
+    problem_setting = draft.get("problem_setting", {})
     method_overview = draft["method_overview"]
-    contributions = draft.get("main_contributions", [])
-    main_results = draft.get("main_results", [])
-    detailed_findings = draft.get("detailed_findings", [])
+    core_claims = draft.get("core_claims", [])
+    method_details = draft.get("method_details", [])
+    data_or_inputs = draft.get("data_or_inputs", [])
+    experimental_setup = draft.get("experimental_setup", [])
+    results = draft.get("results", [])
+    analysis = draft.get("analysis", [])
     limitations = draft.get("limitations", [])
     open_questions = draft.get("open_questions", [])
-    contributions_block = render_claim_sections(
-        contributions,
-        heading_prefix="Contribution",
-        empty_text="No contribution claims extracted yet.",
-        fallback="- Supporting evidence is not linked yet.",
+    core_claims_block = render_entry_sections(
+        core_claims,
+        empty_text="No core claims extracted yet.",
     )
-    results_block = render_claim_sections(
-        main_results,
-        heading_prefix="Result",
-        empty_text="No main results extracted yet.",
-        fallback="- Supporting evidence is not linked yet.",
+    method_details_block = render_entry_sections(
+        method_details,
+        empty_text="No method details extracted yet.",
     )
-    detailed_findings_block = render_claim_sections(
-        detailed_findings,
-        heading_prefix="Detail",
-        empty_text="No detailed findings extracted yet.",
-        fallback="- Supporting evidence is not linked yet.",
+    data_or_inputs_block = render_entry_sections(
+        data_or_inputs,
+        empty_text="No important data or input details extracted yet.",
+    )
+    experimental_setup_block = render_entry_sections(
+        experimental_setup,
+        empty_text="No experimental setup details extracted yet.",
+    )
+    results_block = render_entry_sections(
+        results,
+        empty_text="No significant results extracted yet.",
+    )
+    analysis_block = render_entry_sections(
+        analysis,
+        empty_text="No analytical insights extracted yet.",
     )
     limitations_block = render_bullet_sections(
         limitations,
         empty_text="No limitations extracted yet.",
-        fallback="  - Supporting evidence is not linked yet.",
     )
-    open_questions_block = (
-        "\n".join(
-            f"- {clean_text(item['text'])}"
-            for item in open_questions
-            if clean_text(item.get("text"))
-        )
-        if open_questions
-        else "- No explicit open questions extracted yet."
+    open_questions_block = render_bullet_sections(
+        open_questions,
+        empty_text="- No explicit open questions extracted yet.",
     )
     provenance_lines = [
         f"- Status: `needs-review`",
@@ -996,7 +983,7 @@ def build_page_markdown(
         f"- Extracted text: `{extracted_rel}`",
         f"- Imported at: {utc_now()}",
         f"- Parsed source kind: `{source_kind}`",
-        f"- Page count: {page_count}",
+        f"- Logical document spans: {page_count}",
         f"- Indexed chunks: {chunk_count}",
         f"- Extraction quality: `{quality_label}`",
     ]
@@ -1023,21 +1010,37 @@ verifier_status: pending
 
 {format_section(big_picture)}
 
-## Main Contributions
+## Problem Setting
 
-{contributions_block}
+{format_section(problem_setting)}
+
+## Core Claims
+
+{core_claims_block}
 
 ## Method Overview
 
 {format_section(method_overview)}
 
-## Main Results
+## Method Details
+
+{method_details_block}
+
+## Data And Inputs
+
+{data_or_inputs_block}
+
+## Experimental Setup
+
+{experimental_setup_block}
+
+## Results
 
 {results_block}
 
-## Experiments And Detailed Findings
+## Analysis And Insights
 
-{detailed_findings_block}
+{analysis_block}
 
 ## Limitations
 
@@ -1079,124 +1082,63 @@ def prepare_ingest(
     source_input: str,
     title_override: str | None = None,
     canonical_locator_override: str | None = None,
-    allow_pdf_fallback: bool = False,
 ) -> dict:
     arxiv_ref = parse_arxiv_reference(source_input)
-    source_path = Path(source_input).expanduser().resolve()
+    if arxiv_ref is None:
+        exit_blocked("Supported inputs are arXiv identifiers or arXiv/ar5iv URLs.")
 
-    source_kind = "pdf"
+    source_kind = "html"
     source_url: str | None = None
-    parsed_snapshot_rel: str | None = None
     html_snapshot_text: str | None = None
-    pdf_bytes: bytes | None = None
     html_section_markers: list[dict[str, Any]] | None = None
     section_blocks: dict[str, list[dict[str, str]]] = {}
+    canonical_locator = canonical_locator_override or arxiv_ref["canonical_locator"]
 
-    if arxiv_ref is not None:
-        canonical_locator = arxiv_ref["canonical_locator"]
-        ensure_workspace()
-        conn = connect_db()
-        init_db(conn)
-        duplicate = conn.execute(
-            "SELECT source_id FROM sources WHERE canonical_locator = ?",
-            (canonical_locator,),
-        ).fetchone()
-        if duplicate is not None:
-            conn.close()
-            print(
-                f"Duplicate source detected: {duplicate['source_id']}",
-                file=sys.stderr,
-            )
-            raise SystemExit(2)
-
-        official_html = fetch_url_text(arxiv_ref["html_url"])
-        if official_html and validate_arxiv_html(official_html):
-            source_kind = "arxiv_html"
-            source_url = arxiv_ref["html_url"]
-            html_snapshot_text = official_html
-            html_data = extract_arxiv_html(official_html)
-        else:
-            fallback_html = fetch_url_text(arxiv_ref["ar5iv_url"])
-            if fallback_html and validate_arxiv_html(fallback_html):
-                source_kind = "ar5iv_html"
-                source_url = arxiv_ref["ar5iv_url"]
-                html_snapshot_text = fallback_html
-                html_data = extract_arxiv_html(fallback_html)
-            else:
-                conn.close()
-                if not allow_pdf_fallback:
-                    exit_blocked(
-                        "HTML is unavailable for this arXiv source. "
-                        "Ask the user for approval before using PDF fallback, then rerun with --allow-pdf-fallback."
-                    )
-                source_kind = "pdf"
-                source_url = arxiv_ref["pdf_url"]
-                html_data = None
-
-        pdf_bytes = fetch_url_bytes(arxiv_ref["pdf_url"])
-        if not pdf_bytes:
-            try:
-                conn.close()
-            except Exception:
-                pass
-            raise SystemExit("Failed to download canonical arXiv PDF.")
-        canonical_pdf_page_count = count_pdf_pages_from_bytes(pdf_bytes)
-
-        if html_data is None:
-            temp_pdf = (
-                ROOT / "system" / "cache" / f"{slugify(arxiv_ref['arxiv_id'])}.pdf"
-            )
-            temp_pdf.write_bytes(pdf_bytes)
-            reader = PdfReader(str(temp_pdf))
-            metadata = reader.metadata or {}
-            extracted_text, page_count, page_breaks = extract_pdf(temp_pdf)
-            metadata_title = getattr(metadata, "title", None)
-            metadata_author = getattr(metadata, "author", None)
-            metadata_created = getattr(metadata, "creation_date", None)
-            title = detect_title(
-                temp_pdf, extracted_text, title_override, metadata_title
-            )
-            authors_or_creator = detect_authors(extracted_text, metadata_author)
-            published_at = detect_published_at(
-                extracted_text, str(metadata_created) if metadata_created else None
-            )
-            temp_pdf.unlink(missing_ok=True)
-        else:
-            extracted_text = html_data["extracted_text"]
-            page_count = canonical_pdf_page_count
-            page_breaks = html_data["page_breaks"]
-            title = title_override.strip() if title_override else html_data["title"]
-            authors_or_creator = html_data["authors_or_creator"]
-            published_at = html_data["published_at"]
-            html_section_markers = html_data.get("section_markers")
-            section_blocks = html_data.get("section_blocks") or {}
+    ensure_workspace()
+    conn = connect_db()
+    init_db(conn)
+    duplicate = conn.execute(
+        "SELECT source_id FROM sources WHERE canonical_locator = ?",
+        (canonical_locator,),
+    ).fetchone()
+    if duplicate is not None:
         conn.close()
+        print(
+            f"Duplicate source detected: {duplicate['source_id']}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    official_html = fetch_url_text(arxiv_ref["html_url"])
+    if official_html and validate_arxiv_html(official_html):
+        source_kind = "arxiv_html"
+        source_url = arxiv_ref["html_url"]
+        html_snapshot_text = official_html
+        html_data = extract_arxiv_html(official_html)
     else:
-        if not source_path.exists():
-            exit_blocked(f"PDF not found: {source_path}")
-        if source_path.suffix.lower() != ".pdf":
+        fallback_html = fetch_url_text(arxiv_ref["ar5iv_url"])
+        if fallback_html and validate_arxiv_html(fallback_html):
+            source_kind = "ar5iv_html"
+            source_url = arxiv_ref["ar5iv_url"]
+            html_snapshot_text = fallback_html
+            html_data = extract_arxiv_html(fallback_html)
+        else:
+            conn.close()
             exit_blocked(
-                "Supported inputs are local PDF paths or arXiv/ar5iv identifiers/URLs."
+                "HTML is unavailable for this arXiv source. Only HTML-backed arXiv ingest is supported."
             )
 
-        reader = PdfReader(str(source_path))
-        metadata = reader.metadata or {}
-        extracted_text, page_count, page_breaks = extract_pdf(source_path)
-        metadata_title = getattr(metadata, "title", None)
-        metadata_author = getattr(metadata, "author", None)
-        metadata_created = getattr(metadata, "creation_date", None)
-
-        title = detect_title(
-            source_path, extracted_text, title_override, metadata_title
-        )
-        authors_or_creator = detect_authors(extracted_text, metadata_author)
-        canonical_locator = detect_canonical_locator(
-            extracted_text, canonical_locator_override
-        )
-        published_at = detect_published_at(
-            extracted_text, str(metadata_created) if metadata_created else None
-        )
-        source_url = str(source_path)
+    extracted_text = html_data["extracted_text"]
+    page_breaks = html_data["page_breaks"]
+    page_count = max(1, len(page_breaks)) if extracted_text else 0
+    title = title_override.strip() if title_override else html_data["title"]
+    authors_or_creator = html_data["authors_or_creator"]
+    published_at = html_data["published_at"]
+    html_section_markers = html_data.get("section_markers")
+    section_blocks = html_data.get("section_blocks") or {}
+    figures = html_data.get("figures") or []
+    equations = html_data.get("equations") or []
+    conn.close()
 
     source_id = make_id("src", title)
     version_id = make_id("ver", title)
@@ -1215,21 +1157,26 @@ def prepare_ingest(
             conn.close()
             exit_blocked(f"Duplicate source detected: {duplicate['source_id']}")
 
-    raw_target = RAW_PAPERS_DIR / f"{source_id}.pdf"
     html_target = RAW_HTML_DIR / f"{source_id}.html"
     extracted_target = RAW_EXTRACTED_DIR / f"{source_id}.txt"
     page_target = reserve_page_target(conn, title, source_id)
 
-    if pdf_bytes is not None:
-        raw_target.write_bytes(pdf_bytes)
-    else:
-        shutil.copy2(source_path, raw_target)
-    if html_snapshot_text is not None:
-        html_target.write_text(html_snapshot_text)
-        parsed_snapshot_rel = str(html_target.relative_to(ROOT))
-    else:
-        parsed_snapshot_rel = str(raw_target.relative_to(ROOT))
+    if html_snapshot_text is None:
+        conn.close()
+        raise SystemExit("No HTML snapshot was captured for this arXiv source.")
+    html_target.write_text(html_snapshot_text)
+    parsed_snapshot_rel = str(html_target.relative_to(ROOT))
+    raw_rel = str(html_target.relative_to(ROOT))
     extracted_target.write_text(extracted_text + ("\n" if extracted_text else ""))
+    figure_assets = (
+        download_figure_assets(
+            source_id=source_id,
+            source_url=source_url,
+            figures=figures,
+        )
+        if source_url
+        else []
+    )
 
     section_markers = html_section_markers or detect_section_markers(extracted_text)
     chunks = split_text_into_chunks(
@@ -1253,6 +1200,8 @@ def prepare_ingest(
         chunks=chunks,
         section_blocks=section_blocks,
     )
+    draft_packet["figures"] = figure_assets
+    draft_packet["equations"] = equations
 
     now = utc_now()
     prepared_rel = str((SYSTEM_CACHE_DIR / f"prepared-{source_id}.json").relative_to(ROOT))
@@ -1274,7 +1223,7 @@ def prepare_ingest(
             source_kind,
             source_url,
             parsed_snapshot_rel,
-            str(raw_target.relative_to(ROOT)),
+            raw_rel,
             str(extracted_target.relative_to(ROOT)),
             "prepared",
             now,
@@ -1295,7 +1244,7 @@ def prepare_ingest(
             source_kind,
             source_url,
             parsed_snapshot_rel,
-            str(raw_target.relative_to(ROOT)),
+            raw_rel,
             str(extracted_target.relative_to(ROOT)),
         ),
     )
@@ -1356,7 +1305,7 @@ def prepare_ingest(
         "page_id": page_id,
         "title": title,
         "page_path": str(page_target.relative_to(ROOT)),
-        "raw_path": str(raw_target.relative_to(ROOT)),
+        "raw_path": raw_rel,
         "parsed_snapshot_path": parsed_snapshot_rel,
         "extracted_path": str(extracted_target.relative_to(ROOT)),
         "page_count": page_count,
@@ -1373,7 +1322,7 @@ def prepare_ingest(
         "coordination": {
             "drafter_prompt_path": "prompts/drafter_prompt.md",
             "prepared_json_path": prepared_rel,
-            "finalize_command": f"uv run scripts/hub.py ingest-finalize {prepared_rel} --draft-output-file <draft.json> --json",
+            "finalize_command": f"uv run scripts/hub.py add-source {source_input} --draft-output-file <draft.json> --json",
             "verify_command": f"uv run scripts/hub.py verify {str(page_target.relative_to(ROOT))} --json",
             "target_page_path": str(page_target.relative_to(ROOT)),
         },
@@ -1384,10 +1333,13 @@ def prepare_ingest(
 
 def finalize_ingest(prepared: dict, draft_output: DraftOutput | None = None) -> dict:
     prepared = validate_prepared_ingest(prepared)
+    if draft_output is None:
+        raise ValueError(
+            "draft output is required for ingest-finalize; run the external drafter first"
+        )
     draft = run_drafter(
         prepared["draft_packet"],
         draft_output=draft_output,
-        mode="external" if draft_output is not None else "heuristic",
     )
     page_count = prepared["page_count"]
     chunk_count = prepared["chunk_count"]
@@ -1398,6 +1350,7 @@ def finalize_ingest(prepared: dict, draft_output: DraftOutput | None = None) -> 
         title=prepared["title"],
         source_id=prepared["source_id"],
         version_id=prepared["version_id"],
+        page_rel=prepared["page_path"],
         raw_rel=prepared["raw_path"],
         extracted_rel=prepared["extracted_path"],
         page_count=page_count,
@@ -1507,12 +1460,12 @@ def persist_draft_claims(conn, *, page_id: str, draft: DraftOutput) -> list[str]
             )
         created.append(claim_id)
 
-    for item in draft.get("main_contributions", []):
-        insert_section("main_contribution", item["text"], item["chunk_ids"])
-    for item in draft.get("main_results", []):
-        insert_section("main_result", item["text"], item["chunk_ids"])
-    for item in draft.get("detailed_findings", []):
-        insert_section("detailed_finding", item["text"], item["chunk_ids"])
+    for item in draft.get("core_claims", []):
+        insert_section("core_claim", item["text"], item["chunk_ids"])
+    for item in draft.get("results", []):
+        insert_section("result", item["text"], item["chunk_ids"])
+    for item in draft.get("analysis", []):
+        insert_section("analysis", item["text"], item["chunk_ids"])
     for item in draft.get("limitations", []):
         insert_section("limitation", item["text"], item["chunk_ids"])
     return created

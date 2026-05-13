@@ -10,26 +10,28 @@ Default behavior:
 
 - stage source
 - return a bounded draft handoff packet for the coding agent
-- for arXiv sources, prefer HTML and stop for approval before PDF fallback
+- finalize and attempt publish automatically when draft output is supplied
+- require arXiv HTML from `arxiv.org/html` or `ar5iv`
 
 Coordinator behavior:
 
 1. run `add-source <source>` or `ingest-prepare <source>`
 2. hand `result.draft_packet` to one bounded drafting subagent
-3. call `ingest-finalize <prepared-json> --draft-output-file <draft.json>`
-4. optionally run `verify`
-5. optionally run `publish`
+3. call `add-source <source> --draft-output-file <draft.json>`
+4. `add-source` writes the Markdown page and calls `publish`
+5. if publish verification fails, keep the page as `needs-review` and report warnings
 
 If HTML is unavailable for an arXiv source:
 
-1. stop and ask the user whether PDF fallback is allowed
-2. rerun `add-source <source> --allow-pdf-fallback` or `ingest-prepare <source> --allow-pdf-fallback`
-3. continue with the normal draft handoff and finalize flow
+1. stop ingest
+2. tell the user the paper is unsupported until HTML is available
 
-If you want safe automatic publishing, use:
+Lower-level `ingest-finalize` is available for debugging and advanced orchestration, but it only creates a `needs-review` page and does not publish.
+
+To finalize and publish through the user-facing workflow, use:
 
 ```bash
-uv run scripts/hub.py add-source <source> --draft-output-file <draft.json> --publish-if-pass --json
+uv run scripts/hub.py add-source <source> --draft-output-file <draft.json> --json
 ```
 
 ## Ask question
