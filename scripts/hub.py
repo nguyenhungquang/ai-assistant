@@ -282,6 +282,11 @@ def expected_draft_output_schema() -> dict[str, Any]:
         "equation_ids": ["Equation 1"],
     }
     return {
+        "media_review": {
+            "figures_reviewed": True,
+            "equations_reviewed": True,
+            "no_media_reason": "",
+        },
         "big_picture": section,
         "problem_setting": section,
         "core_claims": [entry],
@@ -313,10 +318,33 @@ def duplicate_source_id(response: dict) -> str | None:
     return None
 
 
+def allowed_media_ids(draft_packet: dict, media_key: str, id_keys: tuple[str, str]) -> list[str]:
+    allowed: list[str] = []
+    seen: set[str] = set()
+    for item in draft_packet.get(media_key, []):
+        for key in id_keys:
+            value = item.get(key)
+            if isinstance(value, str) and value.strip() and value.strip() not in seen:
+                normalized_value = value.strip()
+                allowed.append(normalized_value)
+                seen.add(normalized_value)
+    return allowed
+
+
 def handle_draft_handoff(args: argparse.Namespace) -> tuple[int, dict]:
     prepared = load_prepared_json(args.prepared_json)
     prompt_path = ROOT / "prompts" / "drafter_prompt.md"
     prompt_text = prompt_path.read_text()
+    draft_packet = prepared.get("draft_packet", {}) or {}
+    allowed_figure_ids = allowed_media_ids(
+        draft_packet, "figures", ("figure_id", "label")
+    )
+    allowed_equation_ids = allowed_media_ids(
+        draft_packet, "equations", ("math_id", "label")
+    )
+    media_selection_required = bool(
+        draft_packet.get("figures", []) or draft_packet.get("equations", [])
+    )
     prepared_rel = normalize_path(str(args.prepared_json))
     fallback_finalize_command = (
         f"uv run scripts/hub.py add-source {prepared['source_url']} --draft-output-file <draft.json> --json"
@@ -352,20 +380,16 @@ def handle_draft_handoff(args: argparse.Namespace) -> tuple[int, dict]:
             "json_only": True,
             "use_only_packet_evidence": True,
             "allowed_chunk_ids": [
-                chunk["chunk_id"] for chunk in prepared.get("draft_packet", {}).get("chunks", [])
+                chunk["chunk_id"] for chunk in draft_packet.get("chunks", [])
             ],
-            "allowed_figure_ids": [
-                value
-                for figure in prepared.get("draft_packet", {}).get("figures", [])
-                for value in [figure.get("figure_id"), figure.get("label")]
-                if value
-            ],
-            "allowed_equation_ids": [
-                value
-                for equation in prepared.get("draft_packet", {}).get("equations", [])
-                for value in [equation.get("math_id"), equation.get("label")]
-                if value
-            ],
+            "available_figure_count": len(draft_packet.get("figures", [])),
+            "available_equation_count": len(draft_packet.get("equations", [])),
+            "allowed_figure_ids": allowed_figure_ids,
+            "allowed_equation_ids": allowed_equation_ids,
+            "media_selection_required": media_selection_required,
+            "media_selection_rule": (
+                "When media_selection_required is true, media_review is required. Review available figures/equations, attach important figure_ids/equation_ids to the section that explains them, or set media_review.no_media_reason when no extracted media is useful enough to include."
+            ),
         },
         "next_steps": {
             "finalize_command": finalize_command,

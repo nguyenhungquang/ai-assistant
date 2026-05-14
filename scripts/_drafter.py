@@ -60,7 +60,14 @@ class DraftEntry(TypedDict):
     equation_ids: NotRequired[list[str]]
 
 
+class DraftMediaReview(TypedDict):
+    figures_reviewed: bool
+    equations_reviewed: bool
+    no_media_reason: str
+
+
 class DraftOutput(TypedDict):
+    media_review: NotRequired[DraftMediaReview]
     big_picture: DraftSection
     problem_setting: DraftSection
     core_claims: list[DraftEntry]
@@ -491,7 +498,9 @@ def build_draft_packet(
             "Method Overview must explain how the paper works using method evidence, not result evidence.",
             "Use equations to clarify the method only when they are central; explain them in plain language instead of turning Method Overview into a derivation dump.",
             "If the source contains equations or formal expressions, render them using Obsidian-compatible math syntax with $...$ or $$...$$.",
+            "Review all available figures and equations before drafting.",
             "Use figure_ids and equation_ids only for important media; place selected media in the section that explains it.",
+            "If extracted figures or equations are available but none are useful enough to include, set media_review.no_media_reason.",
             "Do not attach every extracted figure or equation to the draft.",
         ],
         "draft_template": (
@@ -1105,6 +1114,9 @@ def validate_draft_output(
             value = equation.get(key)
             if isinstance(value, str) and value.strip():
                 allowed_equation_ids.add(value.strip())
+    has_figures = bool(packet.get("figures", []))
+    has_equations = bool(packet.get("equations", []))
+    has_media = has_figures or has_equations
 
     def normalize_media_ids(
         section: dict,
@@ -1186,7 +1198,32 @@ def validate_draft_output(
     if not isinstance(draft_output, dict):
         raise ValueError("draft output must be an object")
 
+    media_review = draft_output.get("media_review")
+    normalized_media_review: DraftMediaReview = {
+        "figures_reviewed": False,
+        "equations_reviewed": False,
+        "no_media_reason": "",
+    }
+    if media_review is not None:
+        if not isinstance(media_review, dict):
+            raise ValueError("draft output media_review must be an object")
+        figures_reviewed = media_review.get("figures_reviewed", False)
+        equations_reviewed = media_review.get("equations_reviewed", False)
+        no_media_reason = media_review.get("no_media_reason", "")
+        if not isinstance(figures_reviewed, bool):
+            raise ValueError("media_review.figures_reviewed must be a boolean")
+        if not isinstance(equations_reviewed, bool):
+            raise ValueError("media_review.equations_reviewed must be a boolean")
+        if not isinstance(no_media_reason, str):
+            raise ValueError("media_review.no_media_reason must be a string")
+        normalized_media_review = {
+            "figures_reviewed": figures_reviewed,
+            "equations_reviewed": equations_reviewed,
+            "no_media_reason": no_media_reason.strip(),
+        }
+
     normalized = {
+        "media_review": normalized_media_review,
         "big_picture": normalize_section(
             draft_output.get("big_picture", {}), allow_empty=True
         ),
@@ -1252,6 +1289,16 @@ def validate_draft_output(
     nonempty_sections = [(name, section) for name, section in sections if section["text"]]
     text_to_section: dict[str, str] = {}
     chunk_usage: dict[str, list[str]] = {}
+    selected_figure_ids = [
+        figure_id
+        for _, section in sections
+        for figure_id in section.get("figure_ids", [])
+    ]
+    selected_equation_ids = [
+        equation_id
+        for _, section in sections
+        for equation_id in section.get("equation_ids", [])
+    ]
 
     if strict and not normalized["big_picture"]["text"]:
         raise ValueError("external draft output must include a non-empty big_picture")
@@ -1267,6 +1314,27 @@ def validate_draft_output(
         raise ValueError("external draft output must include method_details")
     if strict and not normalized["results"]:
         raise ValueError("external draft output must include results")
+    if strict and has_media:
+        if media_review is None:
+            raise ValueError(
+                "external draft output must include media_review when the packet contains figures or equations"
+            )
+        if has_figures and not normalized_media_review["figures_reviewed"]:
+            raise ValueError(
+                "media_review.figures_reviewed must be true when figures are available"
+            )
+        if has_equations and not normalized_media_review["equations_reviewed"]:
+            raise ValueError(
+                "media_review.equations_reviewed must be true when equations are available"
+            )
+        if (
+            not selected_figure_ids
+            and not selected_equation_ids
+            and not normalized_media_review["no_media_reason"]
+        ):
+            raise ValueError(
+                "draft output selected no media despite available figures or equations; select important figure_ids/equation_ids or set media_review.no_media_reason"
+            )
 
     for name, section in nonempty_sections:
         if "title" in section and strict and not section["title"]:

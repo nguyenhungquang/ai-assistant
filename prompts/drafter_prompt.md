@@ -12,7 +12,7 @@ Read `draft_packet.full_paper_text` first. That is the primary source for unders
 
 The packet may also include `section_blocks` with full text for important roles such as `method`, `results`, and `conclusion`. Use those blocks as navigation aids when drafting specific sections.
 
-The packet may also include `figures` and `equations`. Treat these as selectable media. Use their stable IDs, such as `figure_id` / `label` for figures and `math_id` / `label` for equations, in the optional `figure_ids` and `equation_ids` fields of the section where they belong.
+The packet may also include `figures` and `equations`. Review the available media every time. Treat these as selectable media. Use their stable IDs, such as `figure_id` / `label` for figures and `math_id` / `label` for equations, in the optional `figure_ids` and `equation_ids` fields of the section where they belong.
 
 ## Output
 
@@ -20,6 +20,11 @@ Return JSON only, with this shape:
 
 ```json
 {
+  "media_review": {
+    "figures_reviewed": true,
+    "equations_reviewed": true,
+    "no_media_reason": ""
+  },
   "big_picture": {
     "text": "...",
     "chunk_ids": ["src_..._chunk_00001"],
@@ -136,7 +141,11 @@ Do not aim for a short executive summary. Aim for a complete, well-structured, e
 - Include at least 1 `core_claims` item, multiple `method_details` items when the method has multiple important components, and multiple `results` items when the paper reports multiple significant findings.
 - Use only `chunk_ids` present in the packet.
 - Every substantive statement must have supporting `chunk_ids`.
-- `figure_ids` and `equation_ids` are optional presentation aids; do not use them as a substitute for evidence-bearing `chunk_ids`.
+- `figure_ids` and `equation_ids` are presentation aids; do not use them as a substitute for evidence-bearing `chunk_ids`.
+- When the packet contains figures or equations, include `media_review`.
+- Set `media_review.figures_reviewed` to `true` when figures are available, and set `media_review.equations_reviewed` to `true` when equations are available.
+- Attach only important media to the section that explains it.
+- Use `media_review.no_media_reason` only when extracted media is available but nothing is useful enough to include.
 - Use `draft_packet.full_paper_text` to understand the whole paper before selecting what matters.
 - Use `candidate_groups` and `section_blocks` as evidence-backed navigation aids, not as the only context you read.
 - Follow the packet `drafting_rules`.
@@ -208,6 +217,7 @@ Do not aim for a short executive summary. Aim for a complete, well-structured, e
 
 ## Equations
 
+- Review all available equations before deciding what to include.
 - Do not include every equation.
 - Attach only equations that materially clarify the method, objective, formal setup, or a key theoretical result.
 - Put selected equations in the section that explains them, usually `method_details`; use `method_overview` only for the central formulation if it is essential to the top-down explanation.
@@ -215,6 +225,7 @@ Do not aim for a short executive summary. Aim for a complete, well-structured, e
 
 ## Figures
 
+- Review all available figures before deciding what to include.
 - Do not include every figure.
 - Attach only figures that materially clarify the surrounding section.
 - Put framework, architecture, pipeline, or conceptual figures in `method_overview` or the relevant `method_details` entry.

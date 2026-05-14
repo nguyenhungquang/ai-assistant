@@ -72,6 +72,8 @@ uv run scripts/hub.py add-source 1706.03762v7 --draft-output-file <draft.json> -
 
 When draft output is supplied, `add-source` finalizes the Markdown page and automatically attempts `publish`. `publish` runs verification internally. If verification fails, the page remains `needs-review` and the command returns warnings for manual review.
 
+If the staged packet contains extracted figures or equations, draft output must include `media_review` and either select important `figure_ids` / `equation_ids` in relevant sections or set `media_review.no_media_reason`. Regenerate or amend older cached draft JSON that predates media support before finalizing.
+
 ### Lower-level finalize only
 
 ```bash

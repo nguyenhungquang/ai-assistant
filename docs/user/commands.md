@@ -20,6 +20,8 @@ The command requires HTML from `arxiv.org/html` or `ar5iv`. If HTML is unavailab
 
 Without draft output, the command stages ingest and returns a draft packet. With draft output, it finalizes the Markdown page and automatically attempts publish. If publish verification fails, the page remains `needs-review`.
 
+When the staged packet includes extracted figures or equations, the draft output must include `media_review`. Select important `figure_ids` / `equation_ids` in the sections that explain them, or set `media_review.no_media_reason` if no extracted media should be included. Older cached draft JSON without `media_review` must be regenerated or amended before finalization.
+
 ### `ask`
 
 Ask a question against the current vault.
