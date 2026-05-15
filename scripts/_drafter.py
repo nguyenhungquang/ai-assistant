@@ -252,6 +252,16 @@ EQUATION_CUES = [
     "objective",
     "probability",
 ]
+NOTATION_EXPLANATION_CUES = [
+    "where",
+    "denotes",
+    "represents",
+    "is the",
+    "objective",
+    "loss",
+    "constraint",
+    "probability",
+]
 
 
 def summarize_paragraph(paragraph: str, max_sentences: int = 3) -> str:
@@ -498,8 +508,11 @@ def build_draft_packet(
             "Method Overview must explain how the paper works using method evidence, not result evidence.",
             "Use equations to clarify the method only when they are central; explain them in plain language instead of turning Method Overview into a derivation dump.",
             "If the source contains equations or formal expressions, render them using Obsidian-compatible math syntax with $...$ or $$...$$.",
+            "When selecting equation_ids or writing formulas, define variables, indices, operators, objectives, and constraints that were not already introduced earlier in the generated Markdown.",
+            "Do not write equation-only method details; use nearby prose such as a short 'where ...' sentence to explain selected notation.",
             "Review all available figures and equations before drafting.",
             "Use figure_ids and equation_ids only for important media; place selected media in the section that explains it.",
+            "Attach important framework, architecture, pipeline, or conceptual figures to method_overview or the relevant method_details entry when they materially clarify the method.",
             "If extracted figures or equations are available but none are useful enough to include, set media_review.no_media_reason.",
             "Do not attach every extracted figure or equation to the draft.",
         ],
@@ -1284,6 +1297,10 @@ def validate_draft_output(
     def normalized_text(text: str) -> str:
         return re.sub(r"\s+", " ", text.strip().lower())
 
+    def has_notation_explanation(text: str) -> bool:
+        lowered = normalized_text(text)
+        return any(cue in lowered for cue in NOTATION_EXPLANATION_CUES)
+
     sections = all_sections()
     nonempty_sections = [(name, section) for name, section in sections if section["text"]]
     text_to_section: dict[str, str] = {}
@@ -1343,6 +1360,10 @@ def validate_draft_output(
             raise ValueError(f"{name} is too short to be useful")
         if strict and not section["chunk_ids"] and not name.startswith("open_questions"):
             raise ValueError(f"{name} must include at least one supporting chunk_id")
+        if strict and section.get("equation_ids") and not has_notation_explanation(text):
+            raise ValueError(
+                f"{name} selects equation_ids but does not explain the notation or objective in prose"
+            )
 
         normalized_body = normalized_text(text)
         previous = text_to_section.get(normalized_body)

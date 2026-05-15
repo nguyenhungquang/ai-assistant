@@ -57,6 +57,10 @@ Current limitation: arXiv HTML must be available from `arxiv.org/html` or `ar5iv
 
    If the packet contains extracted figures or equations, include `media_review` and either attach important `figure_ids` / `equation_ids` to the sections that explain them or provide `media_review.no_media_reason` when extracted media exists but none is useful enough to include.
 
+   Selected equations must be explained in prose. Define variables, indices, operators, objectives, and constraints when they have not already been introduced earlier in the generated Markdown; a short nearby "where ..." sentence is usually enough.
+
+   Attach important framework, architecture, pipeline, or conceptual figures to `method_overview` or to the specific `method_details` entry that explains them when they materially clarify the method. Do not attach low-value or unexplained figures.
+
 5. Save the draft JSON to a temporary or workspace file.
 
 6. Finalize through the user-facing command:

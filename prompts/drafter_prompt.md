@@ -234,11 +234,17 @@ Do not aim for a short executive summary. Aim for a complete, well-structured, e
 - Put selected equations in the section that explains them, usually `method_details`; use `method_overview` only for the central formulation if it is essential to the top-down explanation.
 - Explain selected equations in plain language rather than dropping them without interpretation.
 
+## Notation
+
+- When using `$...$` or `$$...$$`, define variables, indices, operators, objectives, and constraints that have not already been introduced earlier in the generated Markdown.
+- Do not write equation-only method details. The surrounding prose must explain what the formula means and how it supports the method.
+- Prefer a short nearby "where ..." sentence for selected formulas, for example to state what each variable denotes, what an objective or loss optimizes, and what any constraint represents.
+
 ## Figures
 
 - Review all available figures before deciding what to include.
 - Do not include every figure.
 - Attach only figures that materially clarify the surrounding section.
-- Put framework, architecture, pipeline, or conceptual figures in `method_overview` or the relevant `method_details` entry.
+- Put important framework, architecture, pipeline, or conceptual figures in `method_overview` or the relevant `method_details` entry when they materially clarify the paper's method.
 - Put key empirical plots in `results` or `analysis`.
 - Omit low-value appendix figures, repeated plots, decorative figures, and figures that are not discussed in your text.

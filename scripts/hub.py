@@ -457,6 +457,9 @@ def handle_draft_handoff(args: argparse.Namespace) -> tuple[int, dict]:
             "equation_id_rule": (
                 "For equation_ids, use equation math_id values from allowed_equation_ids, not display labels such as 'Equation 1'."
             ),
+            "notation_rule": (
+                "When a section selects equation_ids or includes $...$/$$...$$ notation, define variables, indices, operators, objectives, and constraints not already introduced earlier in the generated Markdown. Avoid equation-only method details; include nearby prose such as a short 'where ...' sentence."
+            ),
             "section_shape_rule": (
                 "big_picture, problem_setting, and method_overview must be objects. core_claims, method_details, data_or_inputs, experimental_setup, results, analysis, limitations, and open_questions must be lists of objects."
             ),
@@ -468,7 +471,7 @@ def handle_draft_handoff(args: argparse.Namespace) -> tuple[int, dict]:
             ),
             "media_selection_required": media_selection_required,
             "media_selection_rule": (
-                "When media_selection_required is true, media_review is required. Review available figures/equations, attach important figure_ids/equation_ids to the section that explains them, or set media_review.no_media_reason when no extracted media is useful enough to include."
+                "When media_selection_required is true, media_review is required. Review available figures/equations, attach important figure_ids/equation_ids to the section that explains them, attach important framework, architecture, pipeline, or conceptual figures to method_overview or the relevant method_details entry when they materially clarify the method, or set media_review.no_media_reason when no extracted media is useful enough to include."
             ),
         },
         "next_steps": {
