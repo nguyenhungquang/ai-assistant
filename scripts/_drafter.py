@@ -1110,10 +1110,9 @@ def validate_draft_output(
                 allowed_figure_ids.add(value.strip())
     allowed_equation_ids: set[str] = set()
     for equation in packet.get("equations", []):
-        for key in ("math_id", "label"):
-            value = equation.get(key)
-            if isinstance(value, str) and value.strip():
-                allowed_equation_ids.add(value.strip())
+        value = equation.get("math_id")
+        if isinstance(value, str) and value.strip():
+            allowed_equation_ids.add(value.strip())
     has_figures = bool(packet.get("figures", []))
     has_equations = bool(packet.get("equations", []))
     has_media = has_figures or has_equations

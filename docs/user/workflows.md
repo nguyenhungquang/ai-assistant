@@ -28,7 +28,7 @@ If HTML is unavailable for an arXiv source:
 
 Lower-level `ingest-finalize` is available for debugging and advanced orchestration, but it only creates a `needs-review` page and does not publish.
 
-If the draft packet contains extracted figures or equations, the drafter output must include `media_review`. The drafter must attach important `figure_ids` or `equation_ids` to the section that explains them, or set `media_review.no_media_reason` when no extracted media is useful enough to include. Cached draft JSON created before media support must be regenerated or amended before finalization.
+If the draft packet contains extracted figures or equations, the drafter output must include `media_review`. The drafter must attach important `figure_ids` or `equation_ids` to the section that explains them, or set `media_review.no_media_reason` when no extracted media is useful enough to include. Equation selections must use `math_id` values in `equation_ids`, not display labels such as `Equation 1`. Cached draft JSON created before media support must be regenerated or amended before finalization.
 
 To finalize and publish through the user-facing workflow, use:
 

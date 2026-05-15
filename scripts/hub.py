@@ -8,7 +8,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from _common import agent_edit_policy, ensure_runtime_config, get_runtime_mode
+from _common import (
+    agent_edit_policy,
+    connect_db,
+    ensure_runtime_config,
+    get_runtime_mode,
+    init_db,
+)
+from _drafter import validate_draft_output
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -279,7 +286,7 @@ def expected_draft_output_schema() -> dict[str, Any]:
         "text": "string",
         "chunk_ids": ["src_..._chunk_00001"],
         "figure_ids": ["Figure 1"],
-        "equation_ids": ["Equation 1"],
+        "equation_ids": ["S3.Ex1.m1"],
     }
     return {
         "media_review": {
@@ -331,6 +338,64 @@ def allowed_media_ids(draft_packet: dict, media_key: str, id_keys: tuple[str, st
     return allowed
 
 
+def recover_prepared_payload(source_id: str) -> tuple[dict[str, Any] | None, str | None]:
+    conn = connect_db()
+    init_db(conn)
+    row = conn.execute(
+        "SELECT packet_json FROM prepared_packets WHERE source_id = ?",
+        (source_id,),
+    ).fetchone()
+    conn.close()
+    if row is None:
+        return None, f"No staged prepared packet row found for duplicate source: {source_id}"
+    try:
+        payload = json.loads(row["packet_json"])
+    except json.JSONDecodeError as exc:
+        return None, f"Staged prepared packet row is invalid JSON: {exc}"
+    if not isinstance(payload, dict):
+        return None, "Staged prepared packet row is not a JSON object"
+    if isinstance(payload.get("draft_packet"), dict) and "page_count" in payload:
+        return normalize_paths(payload), None
+    return None, (
+        "Prepared packet cache is missing and the staged DB row uses the legacy "
+        "draft-packet-only format, so it cannot be recovered. Re-stage the source "
+        "to create a recoverable prepared payload."
+    )
+
+
+def load_draft_output_for_precheck(
+    args: argparse.Namespace, draft_input_text: str | None
+) -> dict[str, Any]:
+    if getattr(args, "draft_output_file", None):
+        if args.draft_output_file == "-":
+            raw = draft_input_text or ""
+        else:
+            raw = Path(args.draft_output_file).read_text()
+    elif getattr(args, "draft_output_stdin", False):
+        raw = draft_input_text or ""
+    else:
+        raise ValueError("draft output is required")
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError("draft output must be a JSON object")
+    return parsed
+
+
+def precheck_draft_output(
+    prepared_payload: dict[str, Any],
+    args: argparse.Namespace,
+    draft_input_text: str | None,
+) -> tuple[bool, str | None]:
+    try:
+        draft_output = load_draft_output_for_precheck(args, draft_input_text)
+        validate_draft_output(
+            prepared_payload.get("draft_packet", {}), draft_output, strict=True
+        )
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return False, f"Draft output failed pre-finalize validation: {exc}"
+    return True, None
+
+
 def handle_draft_handoff(args: argparse.Namespace) -> tuple[int, dict]:
     prepared = load_prepared_json(args.prepared_json)
     prompt_path = ROOT / "prompts" / "drafter_prompt.md"
@@ -340,7 +405,7 @@ def handle_draft_handoff(args: argparse.Namespace) -> tuple[int, dict]:
         draft_packet, "figures", ("figure_id", "label")
     )
     allowed_equation_ids = allowed_media_ids(
-        draft_packet, "equations", ("math_id", "label")
+        draft_packet, "equations", ("math_id",)
     )
     media_selection_required = bool(
         draft_packet.get("figures", []) or draft_packet.get("equations", [])
@@ -382,10 +447,25 @@ def handle_draft_handoff(args: argparse.Namespace) -> tuple[int, dict]:
             "allowed_chunk_ids": [
                 chunk["chunk_id"] for chunk in draft_packet.get("chunks", [])
             ],
+            "chunk_id_rule": (
+                "Chunk IDs are not guaranteed to be sequential. Use only exact IDs from allowed_chunk_ids or the packet chunks."
+            ),
             "available_figure_count": len(draft_packet.get("figures", [])),
             "available_equation_count": len(draft_packet.get("equations", [])),
             "allowed_figure_ids": allowed_figure_ids,
             "allowed_equation_ids": allowed_equation_ids,
+            "equation_id_rule": (
+                "For equation_ids, use equation math_id values from allowed_equation_ids, not display labels such as 'Equation 1'."
+            ),
+            "section_shape_rule": (
+                "big_picture, problem_setting, and method_overview must be objects. core_claims, method_details, data_or_inputs, experimental_setup, results, analysis, limitations, and open_questions must be lists of objects."
+            ),
+            "chunk_reuse_rule": (
+                "Using the same chunk_id in 4 or more sections fails validation; distribute evidence across relevant chunks."
+            ),
+            "method_overview_rule": (
+                "method_overview must explain the overall approach with method evidence and overview cues, not only equations, hyperparameters, benchmark setup, or narrow implementation details."
+            ),
             "media_selection_required": media_selection_required,
             "media_selection_rule": (
                 "When media_selection_required is true, media_review is required. Review available figures/equations, attach important figure_ids/equation_ids to the section that explains them, or set media_review.no_media_reason when no extracted media is useful enough to include."
@@ -422,12 +502,23 @@ def handle_add_source(args: argparse.Namespace) -> tuple[int, dict]:
         if duplicate_id and finalize_extra_args:
             prepared_path = ROOT / "system" / "cache" / f"prepared-{duplicate_id}.json"
             if not prepared_path.exists():
-                prepare_response["command"] = "add-source"
-                prepare_response["issues"].append(
-                    f"Prepared packet not found for duplicate source: {normalize_path(str(prepared_path))}"
+                recovered_payload, recovery_issue = recover_prepared_payload(duplicate_id)
+                if recovered_payload is None:
+                    prepare_response["command"] = "add-source"
+                    prepare_response["issues"].append(
+                        f"Prepared packet not found for duplicate source: {normalize_path(str(prepared_path))}"
+                    )
+                    if recovery_issue:
+                        prepare_response["issues"].append(recovery_issue)
+                    return prepare_code, prepare_response
+                prepared_path.parent.mkdir(parents=True, exist_ok=True)
+                prepared_path.write_text(json.dumps(recovered_payload, indent=2))
+                prepared_payload = recovered_payload
+                warnings.append(
+                    f"Recovered missing prepared packet cache from staged DB row: {normalize_path(str(prepared_path))}"
                 )
-                return prepare_code, prepare_response
-            prepared_payload = load_prepared_json(str(prepared_path))
+            else:
+                prepared_payload = load_prepared_json(str(prepared_path))
         else:
             prepare_response["command"] = "add-source"
             return prepare_code, prepare_response
@@ -473,21 +564,44 @@ def handle_add_source(args: argparse.Namespace) -> tuple[int, dict]:
             },
         )
         return 2, response
+    precheck_ok, precheck_issue = precheck_draft_output(
+        prepared_payload, args, draft_input_text
+    )
+    if not precheck_ok:
+        return 2, envelope(
+            command="add-source",
+            ok=False,
+            status="blocked",
+            issues=[precheck_issue or "Draft output failed pre-finalize validation"],
+            warnings=warnings,
+            result={
+                "source_id": prepared_payload.get("source_id"),
+                "version_id": prepared_payload.get("version_id"),
+                "page_id": prepared_payload.get("page_id"),
+                "page_path": prepared_payload.get("page_path"),
+                "prepared_json": normalize_path(str(prepared_path)),
+            },
+            writes={
+                "prepared_json": normalize_path(str(prepared_path)),
+            },
+        )
     finalize_args = [str(prepared_path)] + finalize_extra_args
     finalize_proc = run_script(
         "ingest_finalize.py", finalize_args, input_text=draft_input_text
     )
-    try:
-        prepared_path.unlink(missing_ok=True)
-    except Exception:
-        pass
 
     if finalize_proc.returncode != 0:
         code, response = map_failure(
             "add-source", finalize_proc.stderr, finalize_proc.returncode
         )
         response["warnings"] = warnings
+        response["writes"] = {"prepared_json": normalize_path(str(prepared_path))}
         return code, response
+
+    try:
+        prepared_path.unlink(missing_ok=True)
+    except Exception:
+        pass
 
     finalized = normalize_paths(json.loads(finalize_proc.stdout))
     result = {

@@ -12,7 +12,7 @@ Read `draft_packet.full_paper_text` first. That is the primary source for unders
 
 The packet may also include `section_blocks` with full text for important roles such as `method`, `results`, and `conclusion`. Use those blocks as navigation aids when drafting specific sections.
 
-The packet may also include `figures` and `equations`. Review the available media every time. Treat these as selectable media. Use their stable IDs, such as `figure_id` / `label` for figures and `math_id` / `label` for equations, in the optional `figure_ids` and `equation_ids` fields of the section where they belong.
+The packet may also include `figures` and `equations`. Review the available media every time. Treat these as selectable media. Use stable `figure_id` values, or figure `label` values when needed, in `figure_ids`. Use equation `math_id` values in `equation_ids`; do not use equation display labels such as `"Equation 1"`.
 
 ## Output
 
@@ -118,6 +118,12 @@ Return JSON only, with this shape:
 }
 ```
 
+Top-level shape requirements:
+
+- `big_picture`, `problem_setting`, and `method_overview` are objects.
+- `core_claims`, `method_details`, `data_or_inputs`, `experimental_setup`, `results`, `analysis`, `limitations`, and `open_questions` are lists of objects.
+- `chunk_ids`, `figure_ids`, and `equation_ids` are lists of strings.
+
 ## Goal
 
 Produce a generalized technical reference page that works for many kinds of papers.
@@ -140,8 +146,11 @@ Do not aim for a short executive summary. Aim for a complete, well-structured, e
 - `problem_setting` should explain the task, setting, or challenge the paper is addressing when the packet supports it.
 - Include at least 1 `core_claims` item, multiple `method_details` items when the method has multiple important components, and multiple `results` items when the paper reports multiple significant findings.
 - Use only `chunk_ids` present in the packet.
+- Chunk IDs are not guaranteed to be sequential. Copy exact IDs from the packet; do not invent IDs by counting.
 - Every substantive statement must have supporting `chunk_ids`.
+- Do not use the same `chunk_id` in 4 or more sections. Broad chunk reuse fails validation; use the most specific supporting chunks available.
 - `figure_ids` and `equation_ids` are presentation aids; do not use them as a substitute for evidence-bearing `chunk_ids`.
+- `equation_ids` must use the packet equation `math_id`, not equation labels.
 - When the packet contains figures or equations, include `media_review`.
 - Set `media_review.figures_reviewed` to `true` when figures are available, and set `media_review.equations_reviewed` to `true` when equations are available.
 - Attach only important media to the section that explains it.
@@ -164,7 +173,7 @@ Do not aim for a short executive summary. Aim for a complete, well-structured, e
   Capture the paper's main claims or contributions. Use one item per major claim.
 
 - `method_overview`:
-  Present the method top down. Start with the overall design or conceptual strategy, then explain the major components and how they interact. If the packet has one framework, architecture, pipeline, or conceptual figure that materially clarifies the method, attach it here with `figure_ids`. Do not let this section collapse into only equations or hyperparameters.
+  Present the method top down. Start with the overall design or conceptual strategy, then explain the major components and how they interact. Use overview cues such as the overall approach, framework, pipeline, architecture, system design, or training/inference flow when the paper supports them. If the packet has one framework, architecture, pipeline, or conceptual figure that materially clarifies the method, attach it here with `figure_ids`. Do not let this section collapse into only equations, hyperparameters, benchmark setup, or narrow implementation details.
 
 - `method_details`:
   Cover the technical details that materially affect how the system works. Include major modules, objectives, algorithms, pipelines, architectural choices, decoding or inference procedures, and important implementation choices when they matter. Attach only central objective, loss, inference, or formal setup equations with `equation_ids`.
@@ -211,6 +220,7 @@ Do not aim for a short executive summary. Aim for a complete, well-structured, e
 - Do not use generic titles like "Detail 1" unless there is no better title.
 - Do not repeat the same sentence across sections.
 - Do not reuse the same `chunk_ids` for nearly every section if other evidence exists in the packet.
+- Do not reuse one chunk in 4 or more sections.
 - Do not make `method_overview` mostly equations, hyperparameters, or benchmark setup.
 - Do not mention metrics or numbers without explaining what they mean for the paper's claims.
 - Do not invent evidence or use outside knowledge.
@@ -220,6 +230,7 @@ Do not aim for a short executive summary. Aim for a complete, well-structured, e
 - Review all available equations before deciding what to include.
 - Do not include every equation.
 - Attach only equations that materially clarify the method, objective, formal setup, or a key theoretical result.
+- Use `math_id` values in `equation_ids`; labels like `"Equation 1"` are display text, not valid IDs.
 - Put selected equations in the section that explains them, usually `method_details`; use `method_overview` only for the central formulation if it is essential to the top-down explanation.
 - Explain selected equations in plain language rather than dropping them without interpretation.
 

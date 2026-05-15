@@ -1264,42 +1264,7 @@ def prepare_ingest(
         ),
     )
 
-    conn.execute(
-        "INSERT OR REPLACE INTO prepared_packets (source_id, version_id, page_id, packet_json, created_at) VALUES (?, ?, ?, ?, ?)",
-        (
-            source_id,
-            version_id,
-            page_id,
-            json.dumps(draft_packet, sort_keys=True),
-            now,
-        ),
-    )
-
-    for chunk in chunks:
-        conn.execute(
-            """
-            INSERT INTO chunks (
-                chunk_id, source_id, version_id, section_path, chunk_text,
-                char_start, char_end, page_num
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                f"{source_id}_{chunk['chunk_id']}",
-                source_id,
-                version_id,
-                chunk["section_path"],
-                chunk["chunk_text"],
-                chunk["char_start"],
-                chunk["char_end"],
-                chunk["page_num"],
-            ),
-        )
-
-    rebuild_fts(conn)
-    conn.commit()
-    conn.close()
-
-    return {
+    prepared_payload = {
         "source_id": source_id,
         "version_id": version_id,
         "page_id": page_id,
@@ -1329,6 +1294,43 @@ def prepare_ingest(
         "draft_packet": draft_packet,
         "status": "prepared",
     }
+
+    conn.execute(
+        "INSERT OR REPLACE INTO prepared_packets (source_id, version_id, page_id, packet_json, created_at) VALUES (?, ?, ?, ?, ?)",
+        (
+            source_id,
+            version_id,
+            page_id,
+            json.dumps(prepared_payload, sort_keys=True),
+            now,
+        ),
+    )
+
+    for chunk in chunks:
+        conn.execute(
+            """
+            INSERT INTO chunks (
+                chunk_id, source_id, version_id, section_path, chunk_text,
+                char_start, char_end, page_num
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                f"{source_id}_{chunk['chunk_id']}",
+                source_id,
+                version_id,
+                chunk["section_path"],
+                chunk["chunk_text"],
+                chunk["char_start"],
+                chunk["char_end"],
+                chunk["page_num"],
+            ),
+        )
+
+    rebuild_fts(conn)
+    conn.commit()
+    conn.close()
+
+    return prepared_payload
 
 
 def finalize_ingest(prepared: dict, draft_output: DraftOutput | None = None) -> dict:
@@ -1576,7 +1578,13 @@ def validate_prepared_ingest(prepared: dict[str, Any]) -> dict[str, Any]:
         conn.close()
         raise ValueError("prepared quality_notes must be a list of strings")
 
-    persisted_packet = json.loads(packet_row["packet_json"])
+    persisted_payload = json.loads(packet_row["packet_json"])
+    persisted_packet = (
+        persisted_payload["draft_packet"]
+        if isinstance(persisted_payload, dict)
+        and isinstance(persisted_payload.get("draft_packet"), dict)
+        else persisted_payload
+    )
     if packet != persisted_packet:
         conn.close()
         raise ValueError("prepared packet does not match persisted staged packet")

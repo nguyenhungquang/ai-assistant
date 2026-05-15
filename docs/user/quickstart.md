@@ -24,7 +24,7 @@ uv run scripts/hub.py add-source 1706.03762v7 --draft-output-file <draft.json> -
 
 After a drafter returns structured JSON, rerun `add-source` with that draft file. The command writes the Markdown page and automatically attempts publish. If verification fails, the page remains `needs-review`.
 
-For packets with extracted figures or equations, draft JSON must include `media_review` and either select important `figure_ids` / `equation_ids` in the relevant sections or provide `media_review.no_media_reason`. Regenerate or amend older cached drafts before finalizing them.
+For packets with extracted figures or equations, draft JSON must include `media_review` and either select important `figure_ids` / `equation_ids` in the relevant sections or provide `media_review.no_media_reason`. Use equation `math_id` values in `equation_ids`, not display labels such as `Equation 1`. Regenerate or amend older cached drafts before finalizing them.
 
 ## 4. Ask a question
 
