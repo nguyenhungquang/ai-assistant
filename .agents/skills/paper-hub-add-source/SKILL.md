@@ -1,11 +1,11 @@
 ---
 name: paper-hub-add-source
-description: Use whenever the user asks to add, save, ingest, import, or publish a paper/source into the research vault.
+description: Use whenever the user asks to add, save, ingest, import, publish, or associate a paper/source with a topic in the research vault.
 ---
 
 # Paper Hub Add Source
 
-Use this skill to add a paper/source to the local-first Obsidian research vault through the repository's deterministic command surface.
+Use this skill to add a paper/source to the local-first Obsidian research vault through the repository's deterministic command surface. Also use it when the user asks to add a paper/source to an existing topic.
 
 ## Supported Sources
 
@@ -22,7 +22,8 @@ Current limitation: arXiv HTML must be available from `arxiv.org/html` or `ar5iv
 - Use `uv` for every repository command.
 - Use `uv run scripts/hub.py` for the add-source workflow and verification/publish checks.
 - Do not edit raw source artifacts. Raw sources are immutable.
-- Do not write wiki pages manually during normal add-source workflows.
+- Do not write wiki pages manually for paper drafting, finalization, or normal add-source workflows.
+- Narrow exception: after `add-source` completes, you may manually update only the explicitly requested existing topic index page in `wiki/topics/*.md` as described in "Topic Association".
 - Do not update SQLite state manually. Let repository commands update durable state.
 - Do not bypass draft validation or final verification.
 - Do not invent evidence outside the packet.
@@ -81,6 +82,62 @@ Current limitation: arXiv HTML must be available from `arxiv.org/html` or `ar5iv
    - publish outcome from `result.publish_verdict` and `status`
 
    If status is `published`, report the published page path. If status remains `needs-review`, report the verification or publish issues without hiding them.
+
+## Topic Association
+
+Use this workflow when the user explicitly asks to add, save, or associate the source with a topic, such as "add this paper to Faithful CoT" or "save this paper under the inoculation-prompt topic."
+
+1. Detect the requested topic name or slug from the user request.
+
+   Examples:
+
+   - `Faithful CoT`
+   - `faithful-cot`
+   - `inoculation-prompt`
+
+2. Resolve the request to exactly one existing topic page in `wiki/topics/*.md`.
+
+   Match candidates by:
+
+   - filename slug, without `.md`
+   - frontmatter `title`
+   - page H1
+
+   Compare case-insensitively. Normalize spaces, underscores, and hyphens when comparing names and slugs.
+
+   If there is no unique match, ask the user for the exact existing topic page. Do not create a topic page by default.
+
+3. Run the normal add-source workflow first.
+
+   Keep paper content and SQLite state owned by:
+
+   ```bash
+   uv run scripts/hub.py add-source <source> --draft-output-file <draft.json> --json
+   ```
+
+   Do not manually edit generated paper pages. Do not manually change paper frontmatter `topics:`. Do not manually update SQLite state.
+
+4. Read the final command output and identify:
+
+   - final paper page path from `result.page_path`, `writes.page`, or equivalent command output
+   - final paper title from command output or the generated paper page title
+   - final status from `status`
+
+5. Update only the resolved topic page's `## Papers` table.
+
+   Add one row using the final title, relative paper link, and final status:
+
+   ```markdown
+   | [Paper Title](../papers/paper-slug.md) | `published` |
+   ```
+
+   Use the actual final status value in backticks, usually `published` or `needs-review`.
+
+   Insert the row below the table header and existing rows. Preserve the existing table style as much as practical. Do not edit any other topic page content.
+
+6. Avoid duplicates.
+
+   Before inserting, check whether the topic page already links to the final paper path. If the paper is already listed, leave the table unchanged and report that the topic association already existed.
 
 ## Draft JSON Contract
 
@@ -167,6 +224,8 @@ Prefer `add-source` for normal user-facing work. Lower-level workflow subcommand
 This skill should handle requests like:
 
 - "Add arXiv 1706.03762v7 to the wiki."
+- "Add arXiv 1706.03762v7 to the Faithful CoT topic."
 - "Save this ar5iv paper into the vault."
+- "Save this paper under the inoculation-prompt topic."
 - "Add this paper and publish it if verification passes."
 - "The draft failed because media was ignored; fix the add-source flow."

@@ -196,7 +196,9 @@ def extract_equations_from_block(
     start_index: int,
 ) -> list[dict[str, Any]]:
     equations: list[dict[str, Any]] = []
-    for math_node in block.find_all("math", attrs={"display": "block"}):
+    for math_node in block.find_all("math"):
+        if not is_extractable_equation_math(math_node):
+            continue
         tex = tex_from_math_node(math_node)
         if not tex:
             continue
@@ -212,6 +214,14 @@ def extract_equations_from_block(
             }
         )
     return equations
+
+
+def is_extractable_equation_math(math_node: Any) -> bool:
+    if math_node.get("display") == "block":
+        return True
+    return math_node.find_parent(
+        class_=re.compile(r"\b(?:ltx_equation|ltx_equationgroup|ltx_eqn_cell)\b")
+    ) is not None
 
 
 def extract_arxiv_html(html_text: str) -> dict:
@@ -357,6 +367,17 @@ def extract_arxiv_html(html_text: str) -> dict:
                 if para_text:
                     append_block(para_text)
                     section_texts.append(para_text)
+            elif child_name == "table" and child.find(
+                class_=re.compile(r"\b(?:ltx_equation|ltx_equationgroup|ltx_eqn_cell)\b")
+            ):
+                equations.extend(
+                    extract_equations_from_block(
+                        child,
+                        section_path=section_path,
+                        section_ref=section_ref,
+                        start_index=len(equations) + 1,
+                    )
+                )
 
         append_section_block(current_root_role, section_path, section_texts)
         return section_texts
