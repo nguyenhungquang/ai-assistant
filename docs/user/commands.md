@@ -30,6 +30,14 @@ Ask a question against the current vault.
 uv run scripts/hub.py ask "<query>" [--json]
 ```
 
+### `search`
+
+Search ingested paper chunks with SQLite FTS. Pass compact keywords or phrases, not a full natural-language question.
+
+```bash
+uv run scripts/hub.py search "<keywords-or-phrase>" [--top-k 10] [--json]
+```
+
 ### `verify`
 
 Verify a wiki page.
@@ -55,4 +63,4 @@ These are mainly useful for debugging and advanced orchestration:
 - `draft-handoff`
 - `retrieve`
 
-Most users should prefer `add-source` and `ask`.
+Most users should prefer `add-source`, `search`, and `ask`.

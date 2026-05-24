@@ -73,6 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
     retrieve.add_argument("--top-k", type=int, default=5)
     retrieve.add_argument("--json", action="store_true")
 
+    search = subparsers.add_parser("search", help="Search ingested paper chunks")
+    search.add_argument("query")
+    search.add_argument("--top-k", type=int, default=10)
+    search.add_argument("--json", action="store_true")
+
     ask = subparsers.add_parser(
         "ask", help="User-facing workflow wrapper for question answering"
     )
@@ -679,6 +684,29 @@ def handle_retrieve(args: argparse.Namespace) -> tuple[int, dict]:
     return 0, response
 
 
+def handle_search(args: argparse.Namespace) -> tuple[int, dict]:
+    proc = run_script(
+        "search_papers.py",
+        [args.query, "--top-k", str(args.top_k), "--json"],
+    )
+    if proc.returncode != 0:
+        return map_failure("search", proc.stderr, proc.returncode)
+    parsed = normalize_paths(json.loads(proc.stdout))
+    response = envelope(
+        command="search",
+        ok=True,
+        status="ok",
+        issues=[],
+        warnings=[],
+        result={
+            "query": parsed.get("query"),
+            "results": parsed.get("results", []),
+        },
+        writes={},
+    )
+    return 0, response
+
+
 def synthesize_answer(
     query: str, pages: list[dict], claims: list[dict], chunks: list[dict]
 ) -> dict[str, Any]:
@@ -860,6 +888,7 @@ def main() -> None:
         "config": handle_config,
         "ingest-finalize": handle_ingest_finalize,
         "retrieve": handle_retrieve,
+        "search": handle_search,
         "verify": handle_verify,
         "publish": handle_publish,
     }

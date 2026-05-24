@@ -253,6 +253,15 @@ def db_has_retrieval_schema(conn: sqlite3.Connection) -> bool:
     return required.issubset(existing)
 
 
+def db_has_paper_search_schema(conn: sqlite3.Connection) -> bool:
+    required = {"chunks", "chunks_fts", "sources", "pages"}
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
+    ).fetchall()
+    existing = {row["name"] for row in rows}
+    return required.issubset(existing)
+
+
 def init_db(conn: sqlite3.Connection) -> None:
     for statement in SCHEMA_STATEMENTS:
         conn.execute(statement)
@@ -444,7 +453,11 @@ def retrieve_supporting_chunks(
         if page_row is not None:
             scoped_source_id = page_row["primary_source_id"]
 
-    limit = max(top_k * 4, 10) if candidate_limit is None else max(candidate_limit, top_k)
+    limit = (
+        max(top_k * 4, 10)
+        if candidate_limit is None
+        else max(candidate_limit, top_k)
+    )
     rows = conn.execute(
         """
         SELECT
@@ -500,6 +513,74 @@ def retrieve_supporting_chunks(
         if len(deduped) >= top_k:
             break
     return deduped
+
+
+def search_paper_chunks(
+    conn: sqlite3.Connection,
+    *,
+    query: str,
+    top_k: int = 10,
+    candidate_limit: int | None = None,
+) -> list[dict]:
+    normalized_query = query.strip()
+    if not normalized_query:
+        return []
+
+    match_query = safe_match_query(normalized_query)
+    limit = max(top_k * 4, 10) if candidate_limit is None else max(candidate_limit, top_k)
+    rows = conn.execute(
+        """
+        SELECT
+            c.chunk_id,
+            c.source_id,
+            s.title AS paper_title,
+            s.status AS source_status,
+            p.path AS page_path,
+            p.status AS page_status,
+            c.section_path,
+            c.page_num,
+            c.char_start,
+            c.char_end,
+            c.chunk_text,
+            snippet(chunks_fts, 3, '[', ']', '...', 36) AS snippet,
+            bm25(chunks_fts) AS fts_rank
+        FROM chunks_fts
+        JOIN chunks c ON c.chunk_id = chunks_fts.chunk_id
+        JOIN sources s ON s.source_id = c.source_id
+        LEFT JOIN pages p ON p.primary_source_id = c.source_id
+        WHERE chunks_fts MATCH ?
+        ORDER BY fts_rank
+        LIMIT ?
+        """,
+        (match_query, limit),
+    ).fetchall()
+
+    reranked: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        chunk_text = item.get("chunk_text") or ""
+        snippet_text = item.get("snippet") or ""
+        excerpt = snippet_text.strip() or chunk_text[:400].strip()
+        section_path_value = item.get("section_path")
+        chunk_length = len(chunk_text.strip())
+        heading_penalty = 3.0 if is_heading_like(chunk_text) else 0.0
+        short_chunk_penalty = 1.5 if chunk_length < 120 else 0.0
+        bonus = section_bonus(section_path_value)
+        overlap = lexical_overlap_bonus(normalized_query, chunk_text[:600])
+        adjusted_rank = (
+            item["fts_rank"] + bonus + overlap + heading_penalty + short_chunk_penalty
+        )
+        item["status"] = item.get("page_status") or item.get("source_status")
+        item["excerpt"] = excerpt
+        item["section_bonus"] = bonus
+        item["lexical_overlap_bonus"] = overlap
+        item["heading_penalty"] = heading_penalty
+        item["short_chunk_penalty"] = short_chunk_penalty
+        item["adjusted_rank"] = adjusted_rank
+        reranked.append(item)
+
+    reranked.sort(key=lambda item: (item["adjusted_rank"], item["char_start"]))
+    return reranked[:top_k]
 
 
 def append_log(message: str) -> None:
