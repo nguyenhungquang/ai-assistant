@@ -448,6 +448,24 @@ def file_extension_from_url(url: str) -> str:
     return ".png"
 
 
+def resolve_figure_asset_url(source_url: str, src: str) -> str:
+    parsed_source = urlparse(source_url)
+    source_path = parsed_source.path.strip("/")
+    arxiv_html_match = re.fullmatch(
+        r"html/(?P<id>\d{4}\.\d{4,5})(?:v\d+)?", source_path
+    )
+    src_path = urlparse(src).path
+    src_arxiv_asset_match = re.match(r"^(\d{4}\.\d{4,5})v\d+/", src_path)
+    if (
+        parsed_source.netloc.lower() in {"arxiv.org", "www.arxiv.org"}
+        and arxiv_html_match is not None
+        and src_arxiv_asset_match is not None
+        and src_arxiv_asset_match.group(1) == arxiv_html_match.group("id")
+    ):
+        return urljoin("https://arxiv.org/html/", src)
+    return urljoin(f"{source_url.rstrip('/')}/", src)
+
+
 def download_figure_assets(
     *,
     source_id: str,
@@ -469,7 +487,7 @@ def download_figure_assets(
             src = image.get("src")
             if not src:
                 continue
-            image_url = urljoin(f"{source_url.rstrip('/')}/", src)
+            image_url = resolve_figure_asset_url(source_url, src)
             image_bytes = fetch_url_bytes(image_url)
             if not image_bytes:
                 continue
