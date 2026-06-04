@@ -1,40 +1,129 @@
 # Obsidian Research Vault Agent
 
-Local-first research vault for Obsidian, designed to be operated through a coding CLI agent such as Codex or OpenCode.
+A local-first research vault for Obsidian, operated through agent skills.
 
-It ingests papers and posts, stores raw sources immutably, builds Markdown pages for Obsidian, and keeps machine state in SQLite for retrieval, provenance, and workflow control.
+This project helps you build an evidence-backed paper vault without managing the
+workflow by hand. You ask an agent to add papers, ask questions, or create
+literature reviews. The agent uses the repository's skills and deterministic
+commands to write Markdown pages, preserve raw sources, update SQLite state, and
+verify support from the source material.
 
-## What it does
+## What You Can Do
 
-- ingest papers and posts into a local vault
-- keep raw sources immutable in `raw/`
-- create Markdown pages in `wiki/`
-- maintain SQLite-backed retrieval and provenance state in `system/`
-- support top-level user workflows for adding sources and asking questions
+- Add supported papers to an Obsidian-ready vault.
+- Ask natural-language questions about papers already in the vault.
+- Create evidence-backed literature review pages.
+- Keep raw source files immutable.
+- Keep durable wiki pages grounded in retrieved evidence.
 
-## Current scope
+## How You Use It
 
-Implemented user-facing workflows:
+Most users should talk to an agent from the repository root. The public interface
+is the agent skill layer, not the lower-level command line.
 
-- `add-source`
-- `ask`
-- `verify`
-- `publish`
+Example requests:
 
-The current system is a working prototype with staged ingest, claim-aware retrieval, and direct-to-wiki page finalization.
+```text
+Add arXiv 1706.03762v7 to the vault.
+```
 
-## Requirements
+```text
+What do the papers say about reward hacking?
+```
+
+```text
+Create a literature review for faithful chain-of-thought.
+```
+
+```text
+Add this paper to the Faithful CoT topic: https://arxiv.org/abs/1706.03762
+```
+
+The agent will choose the right skill, run the repository commands it needs, and
+report the final page path, verification status, or search evidence.
+
+## Agent Skills
+
+The user-facing workflows are defined as local agent skills:
+
+- `paper-hub-add-source`: add, ingest, draft, verify, publish, or associate a
+  supported source with an existing topic.
+- `paper-hub-ask`: answer questions from the vault's existing paper index.
+- `paper-hub-literature-review`: create Markdown review pages for primary
+  research papers related to a topic or seed paper.
+
+These skills are the intended way to use the project. They enforce the project
+guardrails: raw sources stay immutable, wiki writes stay evidence-backed, and
+SQLite state is updated through repository commands rather than by hand.
+
+## Setup
+
+Requirements:
 
 - Python 3.12+
 - [`uv`](https://github.com/astral-sh/uv)
+- Obsidian, if you want to browse the generated vault visually
 
-## Installation
+Install dependencies:
 
 ```bash
 uv sync
 ```
 
-## Runtime config
+Then open this repository root as an Obsidian vault.
+
+## Current Support
+
+The main add-source workflow currently supports:
+
+- arXiv IDs, such as `1706.03762v7`
+- arXiv URLs
+- ar5iv URLs
+
+For arXiv sources, HTML must be available from `arxiv.org/html` or `ar5iv`.
+If HTML is unavailable, ingest stops. Local PDF ingest and PDF fallback are not
+currently supported.
+
+## What Gets Written
+
+```text
+raw/       immutable source files and extracted assets
+wiki/      human-readable Markdown pages for Obsidian
+system/    SQLite state, indexes, cache, and logs
+scripts/   deterministic workflow commands used by skills
+docs/user/ additional user-facing documentation
+```
+
+Markdown pages in `wiki/` are the main human-facing artifact. SQLite state under
+`system/` supports retrieval, provenance, and workflow control.
+
+## For Agents And Debugging
+
+The skills use `uv run scripts/hub.py` as the deterministic command surface.
+Most users should not need to run these commands directly.
+
+Useful examples when debugging:
+
+```bash
+uv run scripts/hub.py add-source 1706.03762v7 --json
+```
+
+```bash
+uv run scripts/hub.py search "reward hacking" --top-k 10 --json
+```
+
+```bash
+uv run scripts/hub.py verify wiki/papers/paper-foo.md --json
+```
+
+```bash
+uv run scripts/hub.py publish wiki/papers/paper-foo.md --json
+```
+
+Lower-level ingest and drafting commands exist for advanced orchestration, but
+normal user requests should go through the skills.
+
+## Runtime Config
 
 On first run, the project creates `config.env` at the repo root with:
 
@@ -44,8 +133,9 @@ MODE=deploy
 
 Supported values:
 
-- `deploy`: the agent must use existing `scripts/` and `prompts/` without editing them
-- `dev`: the agent may edit `scripts/` and `prompts/`
+- `deploy`: agents must use existing `scripts/` and `prompts/` without editing
+  them
+- `dev`: agents may edit `scripts/` and `prompts/`
 
 Inspect the current mode with:
 
@@ -53,81 +143,12 @@ Inspect the current mode with:
 uv run scripts/hub.py config --json
 ```
 
-## Quick start
-
-### Prepare an arXiv paper for drafting
-
-```bash
-uv run scripts/hub.py add-source 1706.03762v7 --json
-```
-
-This stages ingest and returns a bounded `draft_packet` plus a prepared JSON path for the coding agent to hand to one drafting subagent.
-Only arXiv sources with parseable HTML are currently supported. The command uses `arxiv.org/html` first and falls back to `ar5iv`; if neither HTML source is available, ingest stops.
-
-### Finalize and publish a staged draft
-
-```bash
-uv run scripts/hub.py add-source 1706.03762v7 --draft-output-file <draft.json> --json
-```
-
-When draft output is supplied, `add-source` finalizes the Markdown page and automatically attempts `publish`. `publish` runs verification internally. If verification fails, the page remains `needs-review` and the command returns warnings for manual review.
-
-If the staged packet contains extracted figures or equations, draft output must include `media_review` and either select important `figure_ids` / `equation_ids` in relevant sections or set `media_review.no_media_reason`. Regenerate or amend older cached draft JSON that predates media support before finalizing.
-
-### Lower-level finalize only
-
-```bash
-uv run scripts/hub.py ingest-finalize system/cache/prepared-<source-id>.json --draft-output-file <draft.json>
-```
-
-`ingest-finalize` requires a structured draft from the external drafter and only writes the page as `needs-review`; it does not publish.
-
-### Ask a question
-
-```bash
-uv run scripts/hub.py ask "attention" --json
-```
-
-### Verify a wiki page
-
-```bash
-uv run scripts/hub.py verify wiki/papers/paper-foo.md --json
-```
-
-### Mark a verified wiki page as published
-
-```bash
-uv run scripts/hub.py publish wiki/papers/paper-foo.md --json
-```
-
-## Repository layout
-
-```text
-raw/        immutable source files
-wiki/       human-readable Markdown pages for Obsidian
-system/     SQLite state, indexes, and logs
-scripts/    workflow commands and internal helpers
-docs/user/  user-facing documentation
-```
-
-## Public documentation
+## Documentation
 
 - `docs/user/quickstart.md`
 - `docs/user/commands.md`
 - `docs/user/workflows.md`
 - `docs/user/github-release-checklist.md`
 
-## Notes and current limitations
-
-- Raw sources are immutable.
-- Markdown pages are the human-facing artifact.
-- `add-source` stages ingest and returns `needs-draft` unless you provide `--draft-output-file` or `--draft-output-stdin`.
-- When draft output is supplied, `add-source` finalizes the page and attempts publish automatically.
-- arXiv ingest is HTML-only. Local PDFs and PDF fallback are not supported.
-- `ingest-finalize` requires external drafter output and writes the canonical wiki page directly into its target wiki folder with review status in frontmatter.
-- Verification and synthesis are still improving; current verification is stronger than before but not yet deeply semantic.
-- The repository supports external drafter handoff, but the top-level model orchestration remains the responsibility of the coding CLI agent.
-
-## Development docs
-
-Internal development/project-tracking docs live under `docs-internal/` and are intended for local development only. They are ignored by `.gitignore` and are not part of the release-facing documentation set.
+Internal development notes live under `docs-internal/` when present. They are
+ignored by `.gitignore` and are not part of the release-facing documentation set.
